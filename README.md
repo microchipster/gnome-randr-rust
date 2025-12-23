@@ -4,6 +4,10 @@ A reimplementation of `xrandr` for Gnome on Wayland, especially for systems that
 
 > [!NOTE]  
 > I currently am not able to maintain this, as I no longer have access to a working Linux machine. If someone is interested in maintaining, please let me know!
+>
+> On Gnome 48+, try the [gdctl](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/doc/man/gdctl.rst) CLI that came with it, it's most likely to stay up to date.
+
+(For non-Gnome compositors, see display configuration links at https://arewewaylandyet.com/)
 
 ## Installation
 
@@ -13,7 +17,7 @@ To install this tool, run `cargo install gnome-randr`. A library is also exposed
 
 ## Method
 
-`gnome-randr-rust` uses the `dbus` object `org.gnome.Mutter.DisplayConfig`. See https://wiki.gnome.org/Initiatives/Wayland/Gaps/DisplayConfig for the original proposal, although the specification listed there is somewhat out of date (checked via `dbus introspect` on Gnome shell 40.5). A better (commented) XML file is listed in the `gnome-monitor-config` project [here](https://github.com/jadahl/gnome-monitor-config/blob/master/src/org.gnome.Mutter.DisplayConfig.xml).
+`gnome-randr-rust` uses the `dbus` object `org.gnome.Mutter.DisplayConfig`. See https://wiki.gnome.org/Initiatives/Wayland/Gaps/DisplayConfig for the original proposal, although the specification listed there is somewhat out of date (checked via `dbus introspect` on Gnome shell 40.5). Gnome maintain the evolving XML file [here](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml).
 
 The `GetCurrentState` method is used to list information about the displays, while `ApplyMonitorsConfig` is used to modify the current configuration.
 
