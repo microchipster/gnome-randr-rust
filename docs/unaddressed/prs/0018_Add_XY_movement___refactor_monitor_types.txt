@@ -1,0 +1,6 @@
+PR #18: Add XY movement & refactor monitor types
+Fork repo: https://github.com/FractalMachinist/gnome-randr-rust
+Head ref: monitor_arrangement
+Head sha: 2f4f0a0eaa32dd36e7fdbf92504e7f2f0886945f
+Base repo: https://github.com/maxwellainatchi/gnome-randr-rust
+Base ref: main

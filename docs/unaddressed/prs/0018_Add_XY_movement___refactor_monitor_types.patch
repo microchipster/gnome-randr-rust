@@ -1,0 +1,856 @@
+From 2f4f0a0eaa32dd36e7fdbf92504e7f2f0886945f Mon Sep 17 00:00:00 2001
+From: Zach Allen <fractalmachinist@gmail.com>
+Date: Mon, 6 Jun 2022 19:34:48 -0400
+Subject: [PATCH] Added xy movement. Refactored monitor types.
+
+---
+ Cargo.lock                                    |  24 +--
+ src/cli/modify/actions/displace.rs            |  21 +++
+ src/cli/modify/actions/mod.rs                 |   4 +-
+ src/cli/modify/actions/mode.rs                |   2 +-
+ src/cli/modify/actions/rotation.rs            |  22 +--
+ src/cli/modify/actions/scale.rs               |   2 +-
+ src/cli/modify/mod.rs                         |  70 +++------
+ src/display_config/logical_monitor.rs         | 132 ++--------------
+ src/display_config/mod.rs                     |   5 +-
+ src/display_config/monitor_models/mod.rs      |   5 +
+ src/display_config/monitor_models/monitor.rs  |  40 +++++
+ .../monitor_models/transform.rs               | 147 ++++++++++++++++++
+ src/display_config/physical_monitor.rs        |  25 +--
+ src/display_config/proxied_methods.rs         |  22 ++-
+ 14 files changed, 299 insertions(+), 222 deletions(-)
+ create mode 100644 src/cli/modify/actions/displace.rs
+ create mode 100644 src/display_config/monitor_models/mod.rs
+ create mode 100644 src/display_config/monitor_models/monitor.rs
+ create mode 100644 src/display_config/monitor_models/transform.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 472d3a2..11374c8 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -134,11 +134,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "proc-macro2"
+-version = "1.0.30"
++version = "1.0.39"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "edc3358ebc67bc8b7fa0c007f945b0b18226f78437d61bec735a9eb96b61ee70"
++checksum = "c54b25569025b7fc9651de43004ae593a75ad88543b17178aa5e1b9c4f15f56f"
+ dependencies = [
+- "unicode-xid",
++ "unicode-ident",
+ ]
+ 
+ [[package]]
+@@ -182,13 +182,13 @@ dependencies = [
+ 
+ [[package]]
+ name = "syn"
+-version = "1.0.80"
++version = "1.0.96"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d010a1623fbd906d51d650a9916aaefc05ffa0e4053ff7fe601167f3e715d194"
++checksum = "0748dd251e24453cb8717f0354206b91557e4ec8703673a4b30208f2abaf1ebf"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "unicode-xid",
++ "unicode-ident",
+ ]
+ 
+ [[package]]
+@@ -200,6 +200,12 @@ dependencies = [
+  "unicode-width",
+ ]
+ 
++[[package]]
++name = "unicode-ident"
++version = "1.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d22af068fba1eb5edcb4aea19d382b2a3deb4c8f9d475c589b6ada9e0fd493ee"
++
+ [[package]]
+ name = "unicode-segmentation"
+ version = "1.8.0"
+@@ -212,12 +218,6 @@ version = "0.1.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3ed742d4ea2bd1176e236172c8429aaf54486e7ac098db29ffe6529e0ce50973"
+ 
+-[[package]]
+-name = "unicode-xid"
+-version = "0.2.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8ccb82d61f80a663efe1f787a51b16b5a51e3314d6ac365b08639f52387b33f3"
+-
+ [[package]]
+ name = "vec_map"
+ version = "0.8.2"
+diff --git a/src/cli/modify/actions/displace.rs b/src/cli/modify/actions/displace.rs
+new file mode 100644
+index 0000000..4f6138c
+--- /dev/null
++++ b/src/cli/modify/actions/displace.rs
+@@ -0,0 +1,21 @@
++use gnome_randr::display_config::{
++    physical_monitor::PhysicalMonitor, ApplyConfig, monitor_models::transform::Displacement,
++};
++
++use super::{Action};
++
++pub struct DisplacementAction {
++    pub displacement: Displacement
++}
++
++impl Action<'_> for DisplacementAction {
++    fn apply(&self, config: &mut ApplyConfig, _: &PhysicalMonitor) {
++        config.transform.displacement = self.displacement;
++    }
++}
++
++impl std::fmt::Display for DisplacementAction {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "setting displacement to {}", self.displacement)
++    }
++}
+diff --git a/src/cli/modify/actions/mod.rs b/src/cli/modify/actions/mod.rs
+index abaae4e..5bb882a 100644
+--- a/src/cli/modify/actions/mod.rs
++++ b/src/cli/modify/actions/mod.rs
+@@ -2,13 +2,15 @@ mod mode;
+ mod primary;
+ mod rotation;
+ mod scale;
++mod displace;
+ 
+ use gnome_randr::display_config::{physical_monitor::PhysicalMonitor, ApplyConfig};
+ 
+ pub use mode::ModeAction;
+ pub use primary::PrimaryAction;
+-pub use rotation::RotationAction;
++pub use rotation::OrientationAction;
+ pub use scale::ScaleAction;
++pub use displace::DisplacementAction;
+ 
+ pub trait Action<'a>: std::fmt::Display {
+     fn apply(&self, config: &mut ApplyConfig<'a>, physical_monitor: &PhysicalMonitor);
+diff --git a/src/cli/modify/actions/mode.rs b/src/cli/modify/actions/mode.rs
+index 5efd218..1716cdd 100644
+--- a/src/cli/modify/actions/mode.rs
++++ b/src/cli/modify/actions/mode.rs
+@@ -11,7 +11,7 @@ impl<'a> Action<'a> for ModeAction<'a> {
+         config
+             .monitors
+             .iter_mut()
+-            .find(|monitor| monitor.connector == physical_monitor.connector)
++            .find(|monitor| monitor.connector == physical_monitor.monitor_description.connector)
+             .unwrap()
+             .mode_id = self.mode;
+     }
+diff --git a/src/cli/modify/actions/rotation.rs b/src/cli/modify/actions/rotation.rs
+index 5e4a830..1db6fd1 100644
+--- a/src/cli/modify/actions/rotation.rs
++++ b/src/cli/modify/actions/rotation.rs
+@@ -1,27 +1,21 @@
+ use gnome_randr::display_config::{
+-    logical_monitor::Transform, physical_monitor::PhysicalMonitor, ApplyConfig,
++    physical_monitor::PhysicalMonitor, ApplyConfig, monitor_models::transform::Orientation,
+ };
+ 
+-use super::{super::Rotation, Action};
++use super::{Action};
+ 
+-pub struct RotationAction {
+-    pub rotation: Rotation,
++pub struct OrientationAction {
++    pub orientation: Orientation
+ }
+ 
+-impl Action<'_> for RotationAction {
++impl Action<'_> for OrientationAction {
+     fn apply(&self, config: &mut ApplyConfig, _: &PhysicalMonitor) {
+-        config.transform = match self.rotation {
+-            Rotation::Normal => Transform::NORMAL,
+-            Rotation::Left => Transform::R270,
+-            Rotation::Right => Transform::R90,
+-            Rotation::Inverted => Transform::R180,
+-        }
+-        .bits();
++        config.transform.orientation = self.orientation;
+     }
+ }
+ 
+-impl std::fmt::Display for RotationAction {
++impl std::fmt::Display for OrientationAction {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        write!(f, "setting rotation to {}", self.rotation)
++        write!(f, "setting rotation to {}", self.orientation)
+     }
+ }
+diff --git a/src/cli/modify/actions/scale.rs b/src/cli/modify/actions/scale.rs
+index eb82e49..52933d6 100644
+--- a/src/cli/modify/actions/scale.rs
++++ b/src/cli/modify/actions/scale.rs
+@@ -8,7 +8,7 @@ pub struct ScaleAction {
+ 
+ impl Action<'_> for ScaleAction {
+     fn apply(&self, config: &mut ApplyConfig, _: &PhysicalMonitor) {
+-        config.scale = self.scale;
++        config.transform.displacement.scale = self.scale;
+     }
+ }
+ 
+diff --git a/src/cli/modify/mod.rs b/src/cli/modify/mod.rs
+index e18a863..d8b8ac5 100644
+--- a/src/cli/modify/mod.rs
++++ b/src/cli/modify/mod.rs
+@@ -1,56 +1,20 @@
+ mod actions;
+ 
+-use gnome_randr::{display_config::ApplyConfig, DisplayConfig};
++use gnome_randr::{display_config::{ApplyConfig, monitor_models::transform::{Orientation, Displacement}}, DisplayConfig};
+ use structopt::StructOpt;
+ 
+-use self::actions::{Action, ModeAction, PrimaryAction, RotationAction, ScaleAction};
++use self::actions::{Action, ModeAction, PrimaryAction, OrientationAction, ScaleAction, DisplacementAction};
+ 
+-#[derive(Clone, Copy)]
+-pub enum Rotation {
+-    Normal,
+-    Left,
+-    Right,
+-    Inverted,
+-}
+-
+-impl std::str::FromStr for Rotation {
+-    type Err = std::fmt::Error;
+-
+-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+-        match s.to_lowercase().as_str() {
+-            "normal" => Ok(Rotation::Normal),
+-            "left" => Ok(Rotation::Left),
+-            "right" => Ok(Rotation::Right),
+-            "inverted" => Ok(Rotation::Inverted),
+-            _ => Err(std::fmt::Error),
+-        }
+-    }
+-}
+-
+-impl std::fmt::Display for Rotation {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        write!(
+-            f,
+-            "{}",
+-            match self {
+-                Rotation::Normal => "normal",
+-                Rotation::Left => "left",
+-                Rotation::Right => "right",
+-                Rotation::Inverted => "inverted",
+-            }
+-        )
+-    }
+-}
+ 
+ #[derive(StructOpt)]
+ pub struct ActionOptions {
+     #[structopt(
+         short,
+-        long = "rotate",
+-        help = "One of 'normal', 'left', 'right' or 'inverted'",
+-        long_help = "One of 'normal', 'left', 'right' or 'inverted'. This causes the output contents to be rotated in the specified direction. 'right' specifies a clockwise rotation of the picture and 'left' specifies a counter-clockwise rotation."
++        long,
++        help = "A desired orientation of the display.",
++        long_help = "Any of ('normal', 'left', 'right' or 'inverted'). and optionally 'flipped' joined by ','. EG 'normal,flipped'. This causes the output contents to be rotated in the specified direction. 'right' specifies a 1/4 clockwise rotation of the picture and 'left' specifies a 3/4 clockwise rotation."
+     )]
+-    pub rotation: Option<Rotation>,
++    pub rotation: Option<Orientation>,
+ 
+     #[structopt(
+         short,
+@@ -65,6 +29,14 @@ pub struct ActionOptions {
+ 
+     #[structopt(long, help = "Set the scale")]
+     pub scale: Option<f64>,
++
++    #[structopt(
++        short,
++        long,
++        help = "A desired x,y, and scale.",
++        long_help = "A comma-separated list of displacement information '100,88,1'. The order is always X, Y, Scale. This does not check whether monitors can be arranged in that way."
++    )]
++    pub displacement: Option<Displacement>
+ }
+ 
+ #[derive(StructOpt)]
+@@ -120,8 +92,8 @@ pub fn handle(
+     let primary_is_changing = opts.actions.primary;
+ 
+     if let Some(rotation) = &opts.actions.rotation {
+-        actions.push(Box::new(RotationAction {
+-            rotation: *rotation,
++        actions.push(Box::new(OrientationAction {
++            orientation: *rotation,
+         }));
+     }
+ 
+@@ -137,6 +109,12 @@ pub fn handle(
+         actions.push(Box::new(ScaleAction { scale: *scale }))
+     }
+ 
++    if let Some(displacement) = &opts.actions.displacement {
++        actions.push(Box::new(DisplacementAction {
++            displacement: *displacement,
++        }))
++    }
++
+     if actions.is_empty() {
+         println!("no changes made.");
+         return Ok(());
+@@ -162,11 +140,11 @@ pub fn handle(
+         .monitors
+         .iter()
+         .filter_map(|monitor| {
+-            if monitor.connector == opts.connector {
++            if monitor.monitor_description.connector == opts.connector {
+                 return Some(apply_config.clone());
+             }
+ 
+-            let (logical_monitor, _) = match config.search(&monitor.connector) {
++            let (logical_monitor, _) = match config.search(&monitor.monitor_description.connector) {
+                 Some(monitors) => monitors,
+                 None => return None,
+             };
+diff --git a/src/display_config/logical_monitor.rs b/src/display_config/logical_monitor.rs
+index a2ebfed..6b834aa 100644
+--- a/src/display_config/logical_monitor.rs
++++ b/src/display_config/logical_monitor.rs
+@@ -1,114 +1,18 @@
+ use std::fmt::{self};
+ 
+-use bitflags::bitflags;
+-
+-// monitors displaying this logical monitor
+-#[derive(Debug, Clone)]
+-pub struct Monitor {
+-    // name of the connector (e.g. DP-1, eDP-1 etc)
+-    pub connector: String,
+-
+-    // vendor name
+-    pub vendor: String,
+-
+-    // product name
+-    pub product: String,
+-
+-    // product serial
+-    pub serial: String,
+-}
+-
+-impl Monitor {
+-    pub fn from(result: (String, String, String, String)) -> Monitor {
+-        Monitor {
+-            connector: result.0,
+-            vendor: result.1,
+-            product: result.2,
+-            serial: result.3,
+-        }
+-    }
+-}
+-
+-impl std::fmt::Display for Monitor {
+-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        //      DVI-D-2 DELL S2340M
+-
+-        write!(
+-            f,
+-            "{} {} {} {}",
+-            self.connector, self.vendor, self.product, self.serial
+-        )
+-    }
+-}
+-
+-bitflags! {
+-pub struct Transform: u32 {
+-    const NORMAL = 0b000;
+-    const R90 = 0b001;
+-    const R180 = 0b010;
+-    const R270 = Self::R90.bits | Self::R180.bits;
+-
+-    const FLIPPED = 0b100;
+-    const F90 = Self::R90.bits | Self::FLIPPED.bits;
+-    const F180 = Self::R180.bits | Self::FLIPPED.bits;
+-    const F270 = Self::R270.bits | Self::FLIPPED.bits;
+-}
+-}
+-
+-impl fmt::Display for Transform {
+-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        let display = if self.contains(Transform::R270) {
+-            "left"
+-        } else if self.contains(Transform::R180) {
+-            "inverted"
+-        } else if self.contains(Transform::R90) {
+-            "right"
+-        } else {
+-            "normal"
+-        };
+-
+-        write!(
+-            f,
+-            "{}{}",
+-            if self.contains(Transform::FLIPPED) {
+-                "Flipped "
+-            } else {
+-                ""
+-            },
+-            display
+-        )
+-    }
+-}
++use super::monitor_models::{Transform, MonitorDescription};
+ 
+ //represent current logical monitor configuration
+ #[derive(Debug)]
+ pub struct LogicalMonitor {
+-    // x position
+-    pub x: i32,
+-    // y position
+-    pub y: i32,
+-    // scale
+-    pub scale: f64,
+-
+-    /**
+-     * Posisble transform values:
+-     *   0: normal
+-     *   1: 90°
+-     *   2: 180°
+-     *   3: 270°
+-     *   4: flipped
+-     *   5: 90° flipped
+-     *   6: 180° flipped
+-     *   7: 270° flipped
+-     * TODO: change to enum
+-     */
++    // The transformation that describes where and how to display this logical monitor
+     pub transform: Transform,
+ 
+     // true if this is the primary logical monitor
+     pub primary: bool,
+ 
+     // monitors displaying this logical monitor
+-    pub monitors: Vec<Monitor>,
++    pub monitors: Vec<MonitorDescription>,
+ 
+     // possibly other properties
+     pub properties: dbus::arg::PropMap,
+@@ -117,10 +21,7 @@ pub struct LogicalMonitor {
+ impl Clone for LogicalMonitor {
+     fn clone(&self) -> Self {
+         Self {
+-            x: self.x,
+-            y: self.y,
+-            scale: self.scale,
+-            transform: self.transform,
++            transform: self.transform.clone(),
+             primary: self.primary,
+             monitors: self.monitors.clone(),
+             properties: dbus::arg::PropMap::new(),
+@@ -141,15 +42,17 @@ impl LogicalMonitor {
+         ),
+     ) -> LogicalMonitor {
+         LogicalMonitor {
+-            x: result.0,
+-            y: result.1,
+-            scale: result.2,
+-            transform: Transform::from_bits_truncate(result.3),
++            transform: Transform::from(
++                result.0, 
++                result.1, 
++                result.2, 
++                result.3
++            ),
+             primary: result.4,
+             monitors: result
+                 .5
+                 .into_iter()
+-                .map(Monitor::from)
++                .map(MonitorDescription::from)
+                 .collect(),
+             properties: result.6,
+         }
+@@ -167,10 +70,10 @@ impl LogicalMonitor {
+         Vec<(&str, &'a str, dbus::arg::PropMap)>,
+     ) {
+         (
+-            self.x,
+-            self.y,
+-            self.scale,
+-            self.transform.bits(),
++            self.transform.displacement.x,
++            self.transform.displacement.y,
++            self.transform.displacement.scale,
++            self.transform.orientation.bits(),
+             self.primary,
+             self.monitors
+                 .iter()
+@@ -194,10 +97,7 @@ impl std::fmt::Display for LogicalMonitor {
+ 
+         writeln!(
+             f,
+-            "x: {}, y: {}, scale: {}, rotation: {}, primary: {}",
+-            self.x,
+-            self.y,
+-            self.scale,
++            "{}, primary: {}",
+             self.transform,
+             if self.primary { "yes" } else { "no" }
+         )?;
+diff --git a/src/display_config/mod.rs b/src/display_config/mod.rs
+index b36622d..1f5dfef 100644
+--- a/src/display_config/mod.rs
++++ b/src/display_config/mod.rs
+@@ -1,11 +1,14 @@
+ pub mod logical_monitor;
+ pub mod physical_monitor;
+ pub mod proxied_methods;
++pub mod monitor_models;
+ mod raw;
+ 
+ use logical_monitor::LogicalMonitor;
+ use physical_monitor::PhysicalMonitor;
+ pub use proxied_methods::{ApplyConfig, ApplyMonitor};
++pub use monitor_models::Transform;
++pub use monitor_models::MonitorDescription;
+ 
+ // Config properties/comments are sourced from https://github.com/jadahl/gnome-monitor-config/blob/master/src/org.gnome.Mutter.DisplayConfig.xml
+ 
+@@ -149,7 +152,7 @@ impl DisplayConfig {
+         let physical_monitor = self
+             .monitors
+             .iter()
+-            .find(|monitor| monitor.connector == *connector);
++            .find(|monitor| monitor.monitor_description.connector == *connector);
+ 
+         let logical_monitor = self.logical_monitors.iter().find(|monitor| {
+             monitor
+diff --git a/src/display_config/monitor_models/mod.rs b/src/display_config/monitor_models/mod.rs
+new file mode 100644
+index 0000000..9e851c9
+--- /dev/null
++++ b/src/display_config/monitor_models/mod.rs
+@@ -0,0 +1,5 @@
++pub mod transform;
++pub mod monitor;
++
++pub use transform::Transform;
++pub use monitor::MonitorDescription;
+\ No newline at end of file
+diff --git a/src/display_config/monitor_models/monitor.rs b/src/display_config/monitor_models/monitor.rs
+new file mode 100644
+index 0000000..630ee56
+--- /dev/null
++++ b/src/display_config/monitor_models/monitor.rs
+@@ -0,0 +1,40 @@
++use std::fmt::{self};
++
++// Information used to identify and describe a monitor
++#[derive(Debug, Clone)]
++pub struct MonitorDescription {
++    // name of the connector (e.g. DP-1, eDP-1 etc)
++    pub connector: String,
++
++    // vendor name
++    pub vendor: String,
++
++    // product name
++    pub product: String,
++
++    // product serial
++    pub serial: String,
++}
++
++impl MonitorDescription {
++    pub fn from(result: (String, String, String, String)) -> MonitorDescription {
++        MonitorDescription {
++            connector: result.0,
++            vendor: result.1,
++            product: result.2,
++            serial: result.3,
++        }
++    }
++}
++
++impl fmt::Display for MonitorDescription {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        //      DVI-D-2 DELL S2340M
++
++        write!(
++            f,
++            "{} {} {} {}",
++            self.connector, self.vendor, self.product, self.serial
++        )
++    }
++}
+diff --git a/src/display_config/monitor_models/transform.rs b/src/display_config/monitor_models/transform.rs
+new file mode 100644
+index 0000000..f5b62d9
+--- /dev/null
++++ b/src/display_config/monitor_models/transform.rs
+@@ -0,0 +1,147 @@
++use std::{fmt::{self}};
++
++use bitflags::bitflags;
++
++bitflags! {
++    pub struct Orientation: u32 {
++        const NORMAL = 0b000;
++        const R90 = 0b001;
++        const R180 = 0b010;
++        const R270 = Self::R90.bits | Self::R180.bits;
++    
++        const FLIPPED = 0b100;
++        const F90 = Self::R90.bits | Self::FLIPPED.bits;
++        const F180 = Self::R180.bits | Self::FLIPPED.bits;
++        const F270 = Self::R270.bits | Self::FLIPPED.bits;
++    }
++}
++
++
++
++impl fmt::Display for Orientation {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        let display = if self.contains(Orientation::R270) {
++            "Left"
++        } else if self.contains(Orientation::R180) {
++            "Inverted"
++        } else if self.contains(Orientation::R90) {
++            "Right"
++        } else {
++            "Normal"
++        };
++
++        write!(
++            f,
++            "{}{}",
++            if self.contains(Orientation::FLIPPED) {
++                "Flipped "
++            } else {
++                ""
++            },
++            display
++        )
++    }
++}
++
++impl std::str::FromStr for Orientation {
++    type Err = std::fmt::Error;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        return s.to_lowercase().as_str().split(',').try_fold(
++            Orientation::NORMAL, 
++            |acc, new_cmd| {
++                match new_cmd.to_lowercase().as_str() {
++                    "normal" => Ok(Orientation::NORMAL | acc),
++                    "left" => Ok(Orientation::R270 | acc),
++                    "right" => Ok(Orientation::R90 | acc),
++                    "inverted" => Ok(Orientation::R180 | acc),
++                    "flipped" => Ok(Orientation::FLIPPED | acc),
++                    _ => Err(std::fmt::Error)
++                }
++            }
++        )
++    }
++}
++
++#[derive(Debug, Clone, Copy)]
++pub struct Displacement {
++    // x position
++    pub x: i32,
++    // y position
++    pub y: i32,
++    // scale
++    pub scale: f64
++}
++
++impl fmt::Display for Displacement {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        write!(
++            f,
++            "x: {}, y: {}, scale: {}",
++            self.x, self.y, self.scale
++        )
++    }
++}
++
++impl std::str::FromStr for Displacement {
++    type Err = std::fmt::Error;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        let lower_s = s.to_lowercase();
++        let vals: Vec<&str> = lower_s.as_str().split(',').collect();
++        if vals.len() != 3 {
++            return Err(std::fmt::Error);
++        } else {
++            if let Ok(x) = vals[0].parse::<i32>() {
++                if let Ok(y) = vals[1].parse::<i32>() {
++                    if let Ok(s) = vals[2].parse::<f64>(){
++                        Ok(Displacement{x: x, y: y, scale: s})
++                    } else {
++                        return Err(std::fmt::Error);
++                    }
++                } else {
++                    return Err(std::fmt::Error);
++                }
++            } else {
++                return Err(std::fmt::Error);
++            }
++        }
++    }
++}
++
++#[derive(Debug, Clone)]
++pub struct Transform {
++    // The displacement (location and scale) of this Transform
++    pub displacement: Displacement,
++
++    // The orientation (Rotation and flip) of this Transform
++    pub orientation: Orientation
++}
++
++impl fmt::Display for Transform {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        write!(
++            f,
++            "{}, {}",
++            self.displacement, self.orientation
++        )
++    }
++}
++
++impl Transform {
++    pub fn from(
++        x: i32,
++        y: i32,
++        scale: f64,
++        spin: u32
++    ) -> Transform { 
++            Transform {
++            displacement: Displacement {
++                x: x,
++                y: y,
++                scale: scale
++            },
++            orientation: Orientation::from_bits_truncate(spin) 
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/src/display_config/physical_monitor.rs b/src/display_config/physical_monitor.rs
+index 2c9308a..4361243 100644
+--- a/src/display_config/physical_monitor.rs
++++ b/src/display_config/physical_monitor.rs
+@@ -1,3 +1,5 @@
++use super::monitor_models::MonitorDescription;
++
+ #[derive(Debug)]
+ pub struct KnownModeProperties {
+     pub is_current: bool,
+@@ -114,14 +116,10 @@ impl std::fmt::Display for Mode {
+ /// represent connected physical monitors
+ #[derive(Debug)]
+ pub struct PhysicalMonitor {
+-    // connector name (e.g. HDMI-1, DP-1, etc)
+-    pub connector: String,
+-    // vendor name
+-    pub vendor: String,
+-    // product name
+-    pub product: String,
+-    // product serial
+-    pub serial: String,
++    // Information about the underlying monitor;
++    pub monitor_description: MonitorDescription,
++
++
+     // available modes
+     pub modes: Vec<Mode>,
+ 
+@@ -155,10 +153,7 @@ impl PhysicalMonitor {
+         ),
+     ) -> PhysicalMonitor {
+         PhysicalMonitor {
+-            connector: result.0 .0,
+-            vendor: result.0 .1,
+-            product: result.0 .2,
+-            serial: result.0 .3,
++            monitor_description: MonitorDescription::from(result.0),
+             modes: result.1.into_iter().map(Mode::from).collect(),
+             properties: result.2,
+         }
+@@ -167,11 +162,7 @@ impl PhysicalMonitor {
+ 
+ impl std::fmt::Display for PhysicalMonitor {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        writeln!(
+-            f,
+-            "{} {} {} {}",
+-            self.connector, self.vendor, self.product, self.serial
+-        )?;
++        writeln!(f, "{}", self.monitor_description)?;
+ 
+         for mode in self.modes.iter() {
+             writeln!(f, "{}", &mode)?;
+diff --git a/src/display_config/proxied_methods.rs b/src/display_config/proxied_methods.rs
+index ae6bb4a..537d1f9 100644
+--- a/src/display_config/proxied_methods.rs
++++ b/src/display_config/proxied_methods.rs
+@@ -4,6 +4,8 @@ use dbus::{
+ };
+ 
+ use super::{logical_monitor::LogicalMonitor, physical_monitor::PhysicalMonitor, DisplayConfig};
++use super::monitor_models::Transform;
++
+ 
+ type Result<T> = std::prelude::rust_2021::Result<T, dbus::Error>;
+ 
+@@ -21,10 +23,7 @@ impl ApplyMonitor<'_> {
+ 
+ #[derive(Debug, Clone)]
+ pub struct ApplyConfig<'a> {
+-    pub x_pos: i32,
+-    pub y_pos: i32,
+-    pub scale: f64,
+-    pub transform: u32,
++    pub transform: Transform,
+     pub primary: bool,
+     pub monitors: Vec<ApplyMonitor<'a>>,
+ }
+@@ -35,13 +34,10 @@ impl ApplyConfig<'_> {
+         physical_monitor: &'a PhysicalMonitor,
+     ) -> ApplyConfig<'a> {
+         ApplyConfig {
+-            x_pos: logical_monitor.x,
+-            y_pos: logical_monitor.y,
+-            scale: logical_monitor.scale,
+-            transform: logical_monitor.transform.bits(),
++            transform: logical_monitor.transform.clone(),
+             primary: logical_monitor.primary,
+             monitors: vec![ApplyMonitor {
+-                connector: &physical_monitor.connector,
++                connector: &physical_monitor.monitor_description.connector,
+                 mode_id: &physical_monitor
+                     .modes
+                     .iter()
+@@ -54,10 +50,10 @@ impl ApplyConfig<'_> {
+ 
+     pub fn serialize(&self) -> (i32, i32, f64, u32, bool, Vec<(&str, &str, PropMap)>) {
+         (
+-            self.x_pos,
+-            self.y_pos,
+-            self.scale,
+-            self.transform,
++            self.transform.displacement.x,
++            self.transform.displacement.y,
++            self.transform.displacement.scale,
++            self.transform.orientation.bits(),
+             self.primary,
+             self.monitors
+                 .iter()
