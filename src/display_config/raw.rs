@@ -4,6 +4,7 @@ use dbus;
 use dbus::arg;
 use dbus::blocking;
 
+#[allow(dead_code)]
 pub trait OrgFreedesktopDBusProperties {
     fn get<R0: for<'b> arg::Get<'b> + 'static>(
         &self,
@@ -61,7 +62,8 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target = T>> OrgFreed
             "org.freedesktop.DBus.Properties",
             "Get",
             (interface_name, property_name),
-        ).map(|r: (arg::Variant<R0>,)| (r.0).0)
+        )
+        .map(|r: (arg::Variant<R0>,)| (r.0).0)
     }
 
     fn get_all(&self, interface_name: &str) -> Result<arg::PropMap, dbus::Error> {
@@ -69,7 +71,8 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target = T>> OrgFreed
             "org.freedesktop.DBus.Properties",
             "GetAll",
             (interface_name,),
-        ).map(|r: (arg::PropMap,)| r.0)
+        )
+        .map(|r: (arg::PropMap,)| r.0)
     }
 
     fn set<I2: arg::Arg + arg::Append>(
@@ -86,6 +89,7 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target = T>> OrgFreed
     }
 }
 
+#[allow(dead_code)]
 pub trait OrgFreedesktopDBusIntrospectable {
     fn introspect(&self) -> Result<String, dbus::Error>;
 }
@@ -94,10 +98,12 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target = T>>
     OrgFreedesktopDBusIntrospectable for blocking::Proxy<'a, C>
 {
     fn introspect(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ()).map(|r: (String,)| r.0)
+        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ())
+            .map(|r: (String,)| r.0)
     }
 }
 
+#[allow(dead_code)]
 pub trait OrgFreedesktopDBusPeer {
     fn ping(&self) -> Result<(), dbus::Error>;
     fn get_machine_id(&self) -> Result<String, dbus::Error>;
@@ -111,10 +117,12 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target = T>> OrgFreed
     }
 
     fn get_machine_id(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ()).map(|r: (String,)| r.0)
+        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ())
+            .map(|r: (String,)| r.0)
     }
 }
 
+#[allow(dead_code)]
 pub trait OrgGnomeMutterDisplayConfig {
     fn get_resources(
         &self,
@@ -287,7 +295,8 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target = T>> OrgGnome
             "org.gnome.Mutter.DisplayConfig",
             "ChangeBacklight",
             (serial, output, value),
-        ).map(|r: (i32,)| r.0)
+        )
+        .map(|r: (i32,)| r.0)
     }
 
     fn get_crtc_gamma(

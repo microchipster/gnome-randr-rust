@@ -1,15 +1,25 @@
-use gnome_randr::DisplayConfig;
+use std::fmt::Write;
+
+use gnome_randr::{display_config::resources::Resources, DisplayConfig};
 use structopt::StructOpt;
+
+use super::brightness;
 
 #[derive(StructOpt)]
 pub struct CommandOptions {
     #[structopt(
-        help = "the connector used for the physical monitor.",
-        long_help = "query by the connector used for the physical monitor, e.g. \"HDMI-1\". You can find these with \"query\" (no arguments) if you're unsure."
+        value_name = "CONNECTOR",
+        help = "Connector such as eDP-1 or HDMI-1",
+        long_help = "Connector name reported by \"gnome-randr query\", such as \"eDP-1\" or \"HDMI-1\". Omit it to list every connected output, including the valid modes, scales, and current software brightness state for each one."
     )]
     pub connector: Option<String>,
 
-    #[structopt(short, long)]
+    #[structopt(
+        short,
+        long,
+        help = "Show one-line summaries instead of full details",
+        long_help = "Show only the condensed view. With no connector this prints one summary block per output plus current software brightness state. With a connector it prints only that logical monitor summary and brightness state."
+    )]
     pub summary: bool,
 }
 
@@ -35,26 +45,58 @@ impl std::error::Error for Error {}
 pub fn handle(
     opts: &CommandOptions,
     config: &DisplayConfig,
+    proxy: &dbus::blocking::Proxy<&dbus::blocking::Connection>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let resources = Resources::get_resources(proxy)?;
+
+    let format_brightness = |connector: &str| -> Result<String, Box<dyn std::error::Error>> {
+        Ok(
+            match brightness::load_current_brightness(connector, &resources, proxy)? {
+                Some(current) => current.to_string(),
+                None => "unknown".to_string(),
+            },
+        )
+    };
+
     Ok(match &opts.connector {
         Some(connector) => {
             let (logical_monitor, physical_monitor) =
                 config.search(connector).ok_or(Error::NotFound)?;
+            let brightness = format_brightness(connector)?;
 
             if opts.summary {
-                format!("{}", logical_monitor)
+                format!("{}software brightness: {}\n", logical_monitor, brightness)
             } else {
-                format!("{}\n{}", logical_monitor, physical_monitor)
+                format!(
+                    "{}\n{}software brightness: {}\n",
+                    logical_monitor, physical_monitor, brightness
+                )
             }
         }
         None => {
-            if opts.summary {
+            let mut output = if opts.summary {
                 let mut s = String::new();
                 config.format(&mut s, true)?;
-                s.to_string()
+                s
             } else {
                 format!("{}", config)
+            };
+
+            if !output.ends_with('\n') {
+                output.push('\n');
             }
+
+            writeln!(&mut output, "software brightness:")?;
+            for monitor in &config.monitors {
+                writeln!(
+                    &mut output,
+                    "\t{}: {}",
+                    monitor.connector,
+                    format_brightness(&monitor.connector)?
+                )?;
+            }
+
+            output
         }
     })
 }

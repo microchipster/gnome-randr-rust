@@ -146,11 +146,7 @@ impl LogicalMonitor {
             scale: result.2,
             transform: Transform::from_bits_truncate(result.3),
             primary: result.4,
-            monitors: result
-                .5
-                .into_iter()
-                .map(Monitor::from)
-                .collect(),
+            monitors: result.5.into_iter().map(Monitor::from).collect(),
             properties: result.6,
         }
     }

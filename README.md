@@ -15,6 +15,8 @@ Installation requires `pkg-config` and `cargo`, part of the Rust toolchain. [Car
 
 To install this tool, run `cargo install gnome-randr`. A library is also exposed for use in other Rust programs.
 
+Shell completions can be generated with `gnome-randr completions bash`, `gnome-randr completions zsh`, or `gnome-randr completions fish`. These are generated from the current CLI definition at runtime, with dynamic live completions for monitor-dependent values.
+
 ## Method
 
 `gnome-randr-rust` uses the `dbus` object `org.gnome.Mutter.DisplayConfig`. See https://wiki.gnome.org/Initiatives/Wayland/Gaps/DisplayConfig for the original proposal, although the specification listed there is somewhat out of date (checked via `dbus introspect` on Gnome shell 40.5). Gnome maintain the evolving XML file [here](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml).

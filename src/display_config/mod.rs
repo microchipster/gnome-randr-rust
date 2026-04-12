@@ -2,6 +2,7 @@ pub mod logical_monitor;
 pub mod physical_monitor;
 pub mod proxied_methods;
 mod raw;
+pub mod resources;
 
 use logical_monitor::LogicalMonitor;
 use physical_monitor::PhysicalMonitor;

@@ -1,9 +1,13 @@
 mod actions;
 
-use gnome_randr::{display_config::ApplyConfig, DisplayConfig};
+use gnome_randr::display_config::proxied_methods::BrightnessFilter;
+use gnome_randr::{
+    display_config::resources::Resources, display_config::ApplyConfig, DisplayConfig,
+};
 use structopt::StructOpt;
 
 use self::actions::{Action, ModeAction, PrimaryAction, RotationAction, ScaleAction};
+use super::{brightness, common::resolve_connector};
 
 #[derive(Clone, Copy)]
 pub enum Rotation {
@@ -47,33 +51,65 @@ pub struct ActionOptions {
     #[structopt(
         short,
         long = "rotate",
-        help = "One of 'normal', 'left', 'right' or 'inverted'",
-        long_help = "One of 'normal', 'left', 'right' or 'inverted'. This causes the output contents to be rotated in the specified direction. 'right' specifies a clockwise rotation of the picture and 'left' specifies a counter-clockwise rotation."
+        value_name = "ROTATION",
+        possible_values = &["normal", "left", "right", "inverted"],
+        help = "Rotation: normal, left, right, or inverted",
+        long_help = "Rotate the output. Valid values are \"normal\", \"left\", \"right\", and \"inverted\". \"right\" is clockwise and \"left\" is counter-clockwise."
     )]
     pub rotation: Option<Rotation>,
 
     #[structopt(
         short,
         long,
-        help = "A valid mode for the given display.",
-        long_help = "A valid mode for the given display. To find valid modes use the \"query\" subcommand"
+        value_name = "MODE",
+        help = "Mode id such as 1920x1080@60 from query",
+        long_help = "Mode id reported by \"gnome-randr query CONNECTOR\" for this output, for example \"1920x1080@59.999\". Run \"gnome-randr query\" to list connectors, then \"gnome-randr query CONNECTOR\" to see that output's valid mode ids."
     )]
     pub mode: Option<String>,
 
-    #[structopt(long, help = "Set the given monitor as the primary logical monitor")]
+    #[structopt(
+        long,
+        help = "Make this output the primary monitor",
+        long_help = "Make this output the primary logical monitor. If another monitor is currently primary, it will be cleared."
+    )]
     pub primary: bool,
 
-    #[structopt(long, help = "Set the scale")]
+    #[structopt(
+        long,
+        value_name = "SCALE",
+        help = "Scale such as 1, 1.25, 1.5, or 2 from query",
+        long_help = "Scale factor reported by \"gnome-randr query CONNECTOR\" for this output, typically values like \"1\", \"1.25\", \"1.5\", or \"2\". Run \"gnome-randr query CONNECTOR\" to list the supported scales for that output."
+    )]
     pub scale: Option<f64>,
+
+    #[structopt(
+        long,
+        value_name = "BRIGHTNESS",
+        help = "Brightness factor such as 0.5, 1, or 2",
+        long_help = "Non-negative software brightness factor. \"1\" leaves the current ramp unchanged, \"0.5\" dims it, and \"2\" brightens it. With the default \"linear\" filter this exactly scales the current gamma ramp. The \"gamma\" and \"filmic\" filters keep more highlight detail when brightening above 1. Common presets are 0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, and 2. This does not touch hardware backlight controls."
+    )]
+    pub brightness: Option<f64>,
+
+    #[structopt(
+        long,
+        value_name = "FILTER",
+        default_value = "linear",
+        possible_values = brightness::FILTER_VALUES,
+        parse(try_from_str = brightness::parse_filter),
+        help = "Tone mapping filter: linear, gamma, or filmic",
+        long_help = "Tone mapping filter for software brightness. \"linear\" (default) exactly scales the current gamma ramp like xrandr-style software brightness. \"gamma\" brightens midtones more gently when brightening above 1. \"filmic\" adds a stronger highlight rolloff to preserve contrast. All filters behave linearly when dimming below 1."
+    )]
+    pub filter: BrightnessFilter,
 }
 
 #[derive(StructOpt)]
 pub struct CommandOptions {
     #[structopt(
-        help = "the connector used for the physical monitor.",
-        long_help = "the connector used for the physical monitor you want to modify, e.g. \"HDMI-1\". You can find these with \"query\" (no arguments) if you're unsure."
+        value_name = "CONNECTOR",
+        help = "Connector such as eDP-1 or HDMI-1",
+        long_help = "Connector name for the output you want to modify, such as \"eDP-1\" or \"HDMI-1\". If exactly one output is connected it is used by default. Run \"gnome-randr query\" to list the valid connectors, modes, and scales first."
     )]
-    pub connector: String,
+    pub connector: Option<String>,
 
     #[structopt(flatten)]
     pub actions: ActionOptions,
@@ -81,11 +117,16 @@ pub struct CommandOptions {
     #[structopt(
         short,
         long,
-        help = "Attempt to replicate this configuration the next time this HW layout appears"
+        help = "Persist this layout for this hardware set",
+        long_help = "Try to persist this configuration so Mutter can reuse it the next time the same hardware layout appears."
     )]
     persistent: bool,
 
-    #[structopt(long, help = "List changes without actually applying them")]
+    #[structopt(
+        long,
+        help = "Preview the requested changes without applying them",
+        long_help = "Preview the requested changes without applying them. This is useful to confirm the resolved connector, mode, scale, rotation, primary-monitor, brightness, and filter changes first."
+    )]
     dry_run: bool,
 }
 
@@ -113,11 +154,18 @@ pub fn handle(
     config: &DisplayConfig,
     proxy: &dbus::blocking::Proxy<&dbus::blocking::Connection>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (logical_monitor, physical_monitor) =
-        config.search(&opts.connector).ok_or(Error::NotFound)?;
+    let connector = resolve_connector(
+        opts.connector.as_deref(),
+        config
+            .monitors
+            .iter()
+            .map(|monitor| monitor.connector.as_str()),
+    )?;
+    let (logical_monitor, physical_monitor) = config.search(&connector).ok_or(Error::NotFound)?;
 
     let mut actions = Vec::<Box<dyn Action>>::new();
     let primary_is_changing = opts.actions.primary;
+    let brightness = opts.actions.brightness;
 
     if let Some(rotation) = &opts.actions.rotation {
         actions.push(Box::new(RotationAction {
@@ -137,51 +185,90 @@ pub fn handle(
         actions.push(Box::new(ScaleAction { scale: *scale }))
     }
 
-    if actions.is_empty() {
+    if actions.is_empty() && brightness.is_none() {
         println!("no changes made.");
         return Ok(());
     }
 
-    let mut apply_config = ApplyConfig::from(logical_monitor, physical_monitor);
-
-    if opts.persistent {
-        println!("attempting to persist config to disk")
-    }
-
-    for action in actions.iter() {
-        println!("{}", &action);
-        action.apply(&mut apply_config, physical_monitor);
-    }
-
     if opts.dry_run {
+        if !actions.is_empty() {
+            let mut apply_config = ApplyConfig::from(logical_monitor, physical_monitor);
+
+            if opts.persistent {
+                println!("attempting to persist config to disk")
+            }
+
+            for action in actions.iter() {
+                println!("{}", &action);
+                action.apply(&mut apply_config, physical_monitor);
+            }
+        }
+
+        if let Some(brightness) = brightness {
+            let resources = Resources::get_resources(proxy)?;
+            brightness::apply_brightness(
+                &connector,
+                brightness,
+                opts.actions.filter,
+                true,
+                &resources,
+                proxy,
+            )?;
+        }
+
         println!("dry run: no changes made.");
         return Ok(());
     }
 
-    let all_configs = config
-        .monitors
-        .iter()
-        .filter_map(|monitor| {
-            if monitor.connector == opts.connector {
-                return Some(apply_config.clone());
-            }
+    if !actions.is_empty() {
+        let mut apply_config = ApplyConfig::from(logical_monitor, physical_monitor);
 
-            let (logical_monitor, _) = match config.search(&monitor.connector) {
-                Some(monitors) => monitors,
-                None => return None,
-            };
+        if opts.persistent {
+            println!("attempting to persist config to disk")
+        }
 
-            let mut apply_config = ApplyConfig::from(logical_monitor, monitor);
+        for action in actions.iter() {
+            println!("{}", &action);
+            action.apply(&mut apply_config, physical_monitor);
+        }
 
-            if primary_is_changing {
-                apply_config.primary = false;
-            }
+        let all_configs = config
+            .monitors
+            .iter()
+            .filter_map(|monitor| {
+                if monitor.connector == connector {
+                    return Some(apply_config.clone());
+                }
 
-            Some(apply_config)
-        })
-        .collect();
+                let (logical_monitor, _) = match config.search(&monitor.connector) {
+                    Some(monitors) => monitors,
+                    None => return None,
+                };
 
-    config.apply_monitors_config(proxy, all_configs, opts.persistent)?;
+                let mut apply_config = ApplyConfig::from(logical_monitor, monitor);
+
+                if primary_is_changing {
+                    apply_config.primary = false;
+                }
+
+                Some(apply_config)
+            })
+            .collect();
+
+        config.apply_monitors_config(proxy, all_configs, opts.persistent)?;
+    }
+
+    if let Some(brightness) = brightness {
+        let resources = Resources::get_resources(proxy)?;
+        brightness::apply_brightness(
+            &connector,
+            brightness,
+            opts.actions.filter,
+            false,
+            &resources,
+            proxy,
+        )?;
+    }
 
     Ok(())
 }
