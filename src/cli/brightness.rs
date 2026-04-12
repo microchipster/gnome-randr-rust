@@ -17,15 +17,54 @@ pub(super) fn parse_filter(value: &str) -> Result<BrightnessFilter, String> {
     value.parse()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentBrightnessState {
+    Managed,
+    Identity,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CurrentBrightness {
-    pub brightness: f64,
-    pub filter: BrightnessFilter,
+    pub state: CurrentBrightnessState,
+    pub brightness: Option<f64>,
+    pub filter: Option<BrightnessFilter>,
+}
+
+impl CurrentBrightness {
+    pub fn managed(brightness: f64, filter: BrightnessFilter) -> CurrentBrightness {
+        CurrentBrightness {
+            state: CurrentBrightnessState::Managed,
+            brightness: Some(brightness),
+            filter: Some(filter),
+        }
+    }
+
+    pub fn identity() -> CurrentBrightness {
+        CurrentBrightness {
+            state: CurrentBrightnessState::Identity,
+            brightness: Some(1.0),
+            filter: Some(BrightnessFilter::Linear),
+        }
+    }
+
+    pub fn unknown() -> CurrentBrightness {
+        CurrentBrightness {
+            state: CurrentBrightnessState::Unknown,
+            brightness: None,
+            filter: None,
+        }
+    }
 }
 
 impl std::fmt::Display for CurrentBrightness {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", format_scale(self.brightness), self.filter)
+        match (self.brightness, self.filter) {
+            (Some(brightness), Some(filter)) => {
+                write!(f, "{} ({})", format_scale(brightness), filter)
+            }
+            _ => write!(f, "unknown"),
+        }
     }
 }
 
@@ -180,10 +219,7 @@ fn matching_state(
             if current_gamma
                 .approx_eq(&state.gamma.apply_brightness(state.brightness, state.filter)) =>
         {
-            Some(CurrentBrightness {
-                brightness: state.brightness,
-                filter: state.filter,
-            })
+            Some(CurrentBrightness::managed(state.brightness, state.filter))
         }
         _ => None,
     }
@@ -211,7 +247,7 @@ pub(super) fn load_current_brightness(
     connector: &str,
     resources: &Resources,
     proxy: &dbus::blocking::Proxy<&dbus::blocking::Connection>,
-) -> Result<Option<CurrentBrightness>, Box<dyn std::error::Error>> {
+) -> Result<CurrentBrightness, Box<dyn std::error::Error>> {
     let output = find_output(resources, connector)?;
     let crtc = find_crtc(resources, output)?;
     let current_gamma = resources.get_crtc_gamma(proxy, crtc)?;
@@ -220,17 +256,14 @@ pub(super) fn load_current_brightness(
     let saved_state = state_path.as_deref().and_then(load_state);
 
     if let Some(current) = matching_state(&current_gamma, saved_state.as_ref()) {
-        return Ok(Some(current));
+        return Ok(current);
     }
 
     if current_gamma.is_identity() {
-        return Ok(Some(CurrentBrightness {
-            brightness: 1.0,
-            filter: BrightnessFilter::Linear,
-        }));
+        return Ok(CurrentBrightness::identity());
     }
 
-    Ok(None)
+    Ok(CurrentBrightness::unknown())
 }
 
 pub(super) fn apply_brightness(
@@ -287,6 +320,7 @@ pub(super) fn apply_brightness(
 mod tests {
     use super::{
         matching_state, parse_channel, resolve_base_gamma, BrightnessState, CurrentBrightness,
+        CurrentBrightnessState,
     };
     use gnome_randr::display_config::proxied_methods::{BrightnessFilter, Gamma};
 
@@ -362,8 +396,9 @@ mod tests {
         assert_eq!(
             matching_state(&current, Some(&state)),
             Some(CurrentBrightness {
-                brightness: 1.5,
-                filter: BrightnessFilter::Gamma,
+                state: CurrentBrightnessState::Managed,
+                brightness: Some(1.5),
+                filter: Some(BrightnessFilter::Gamma),
             })
         );
     }

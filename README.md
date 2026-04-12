@@ -17,6 +17,95 @@ To install this tool, run `cargo install gnome-randr`. A library is also exposed
 
 Shell completions can be generated with `gnome-randr completions bash`, `gnome-randr completions zsh`, or `gnome-randr completions fish`. These are generated from the current CLI definition at runtime, with dynamic live completions for monitor-dependent values.
 
+## JSON output
+
+`gnome-randr query --json` prints a documented machine-readable schema for scripts. `gnome-randr query CONNECTOR --json` uses the same schema, filtered down to the requested connector. `--summary` is text-only and cannot be combined with `--json`.
+
+Schema version `1` currently contains:
+
+- top-level metadata: `schema_version`, `serial`, `layout_mode`, `supports_mirroring`, `supports_changing_layout_mode`, `global_scale_required`, and optional `renderer`
+- `logical_monitors`: objects with `x`, `y`, `scale`, `rotation`, `primary`, and associated `monitors`
+- `monitors`: physical outputs with identity fields, optional `display_name` / `is_builtin` / `width_mm` / `height_mm`, supported `modes`, and `software_brightness`
+- each mode includes `id`, `width`, `height`, `refresh_rate`, `preferred_scale`, `supported_scales`, `is_current`, and `is_preferred`
+- `software_brightness.state` is one of `managed`, `identity`, or `unknown`
+- when `software_brightness.state` is `managed` or `identity`, `brightness` and `filter` are populated; otherwise they are `null`
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "serial": 42,
+  "layout_mode": "physical",
+  "supports_mirroring": true,
+  "supports_changing_layout_mode": false,
+  "global_scale_required": false,
+  "renderer": "native",
+  "logical_monitors": [
+    {
+      "x": 0,
+      "y": 0,
+      "scale": 1.0,
+      "rotation": "normal",
+      "primary": true,
+      "monitors": [
+        {
+          "connector": "eDP-1",
+          "vendor": "BOE",
+          "product": "0x07c9",
+          "serial": "0x00000000"
+        }
+      ]
+    }
+  ],
+  "monitors": [
+    {
+      "connector": "eDP-1",
+      "vendor": "BOE",
+      "product": "0x07c9",
+      "serial": "0x00000000",
+      "display_name": "Built-in display",
+      "is_builtin": true,
+      "width_mm": 300,
+      "height_mm": 190,
+      "modes": [
+        {
+          "id": "1920x1080@59.999",
+          "width": 1920,
+          "height": 1080,
+          "refresh_rate": 59.999,
+          "preferred_scale": 1.0,
+          "supported_scales": [1.0, 2.0],
+          "is_current": true,
+          "is_preferred": true
+        }
+      ],
+      "software_brightness": {
+        "state": "managed",
+        "brightness": 1.25,
+        "filter": "filmic"
+      }
+    }
+  ]
+}
+```
+
+Some useful `jq` examples:
+
+```sh
+# list connectors with current software brightness state
+gnome-randr query --json | jq -r '.monitors[] | "\(.connector)\t\(.software_brightness.state)\t\(.software_brightness.brightness // "null")\t\(.software_brightness.filter // "null")"'
+
+# print the current mode id for each connector
+gnome-randr query --json | jq -r '.monitors[] | "\(.connector)\t\(.modes[] | select(.is_current).id)"'
+
+# show only built-in displays
+gnome-randr query --json | jq '.monitors[] | select(.is_builtin == true)'
+
+# get brightness/filter for one connector
+gnome-randr query eDP-1 --json | jq '.monitors[0].software_brightness'
+```
+
 ## Method
 
 `gnome-randr-rust` uses the `dbus` object `org.gnome.Mutter.DisplayConfig`. See https://wiki.gnome.org/Initiatives/Wayland/Gaps/DisplayConfig for the original proposal, although the specification listed there is somewhat out of date (checked via `dbus introspect` on Gnome shell 40.5). Gnome maintain the evolving XML file [here](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml).

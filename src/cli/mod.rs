@@ -51,6 +51,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = args.cmd.unwrap_or(Command::Query(query::CommandOptions {
         connector: None,
         summary: false,
+        json: false,
     }));
 
     match cmd {
