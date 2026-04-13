@@ -19,10 +19,10 @@ use serde_json::Value;
 use structopt::StructOpt;
 
 use super::brightness;
-use super::brightness::{CurrentBrightness, CurrentBrightnessState};
+use super::brightness::{CurrentColor, CurrentColorState};
 use super::common::{format_refresh, format_scale};
 
-const JSON_SCHEMA_VERSION: u32 = 3;
+const JSON_SCHEMA_VERSION: u32 = 4;
 const DISPLAY_PROPERTY_KEYS: [&str; 1] = ["renderer"];
 const MONITOR_PROPERTY_KEYS: [&str; 4] = ["display-name", "is-builtin", "width-mm", "height-mm"];
 
@@ -41,14 +41,14 @@ pub struct CommandOptions {
         short,
         long,
         help = "Show one-line summaries instead of the default sections",
-        long_help = "Show only the condensed text view. With no connector this prints one logical-monitor summary block per active monitor plus current software brightness state. With a connector it prints only that logical monitor summary and brightness state."
+        long_help = "Show only the condensed text view. With no connector this prints one logical-monitor summary block per active monitor plus current software brightness and gamma state. With a connector it prints only that logical monitor summary and managed software color state."
     )]
     pub summary: bool,
 
     #[structopt(
         long,
         help = "Print structured JSON instead of text",
-        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, physical monitors, modes, software brightness, and raw D-Bus property maps for scripts."
+        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, physical monitors, modes, software brightness, software gamma, and raw D-Bus property maps for scripts."
     )]
     pub json: bool,
 
@@ -130,6 +130,7 @@ struct PhysicalMonitorJson {
     height_mm: Option<i64>,
     modes: Vec<ModeJson>,
     software_brightness: SoftwareBrightnessJson,
+    software_gamma: SoftwareGammaJson,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     properties: PropertyJson,
 }
@@ -153,6 +154,14 @@ struct SoftwareBrightnessJson {
     state: String,
     brightness: Option<f64>,
     filter: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SoftwareGammaJson {
+    state: String,
+    red: Option<f64>,
+    green: Option<f64>,
+    blue: Option<f64>,
 }
 
 type SelectedLogicalMonitor<'a> = (usize, &'a LogicalMonitor);
@@ -326,16 +335,30 @@ fn filtered_properties_json(properties: &PropMap, excluded: &[&str]) -> Property
         .collect()
 }
 
-fn software_brightness_json(current: &CurrentBrightness) -> SoftwareBrightnessJson {
+fn software_brightness_json(current: &CurrentColor) -> SoftwareBrightnessJson {
     SoftwareBrightnessJson {
         state: match current.state {
-            CurrentBrightnessState::Managed => "managed",
-            CurrentBrightnessState::Identity => "identity",
-            CurrentBrightnessState::Unknown => "unknown",
+            CurrentColorState::Managed => "managed",
+            CurrentColorState::Identity => "identity",
+            CurrentColorState::Unknown => "unknown",
         }
         .to_string(),
         brightness: current.brightness,
         filter: current.filter.map(|filter| filter.to_string()),
+    }
+}
+
+fn software_gamma_json(current: &CurrentColor) -> SoftwareGammaJson {
+    SoftwareGammaJson {
+        state: match current.state {
+            CurrentColorState::Managed => "managed",
+            CurrentColorState::Identity => "identity",
+            CurrentColorState::Unknown => "unknown",
+        }
+        .to_string(),
+        red: current.gamma_adjustment.map(|gamma| gamma.red),
+        green: current.gamma_adjustment.map(|gamma| gamma.green),
+        blue: current.gamma_adjustment.map(|gamma| gamma.blue),
     }
 }
 
@@ -619,12 +642,12 @@ fn write_monitors<F>(
     output: &mut String,
     config: &DisplayConfig,
     monitors: &[&PhysicalMonitor],
-    brightness_for: &F,
+    color_for: &F,
     verbose: bool,
     show_properties: bool,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+    F: Fn(&str) -> Result<CurrentColor, Box<dyn std::error::Error>>,
 {
     writeln!(output, "monitors:")?;
 
@@ -672,7 +695,12 @@ where
         writeln!(
             output,
             "    software_brightness: {}",
-            brightness_for(&monitor.connector)?
+            color_for(&monitor.connector)?.brightness_display()
+        )?;
+        writeln!(
+            output,
+            "    software_gamma: {}",
+            color_for(&monitor.connector)?.gamma_display()
         )?;
 
         if verbose {
@@ -748,10 +776,10 @@ fn build_list_monitors(
 fn build_json<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
-    brightness_for: &F,
+    color_for: &F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
-    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+    F: Fn(&str) -> Result<CurrentColor, Box<dyn std::error::Error>>,
 {
     let selected = selected_monitors(opts, config)?;
 
@@ -815,9 +843,8 @@ where
                             properties: filtered_properties_json(&mode.properties, &[]),
                         })
                         .collect(),
-                    software_brightness: software_brightness_json(&brightness_for(
-                        &monitor.connector,
-                    )?),
+                    software_brightness: software_brightness_json(&color_for(&monitor.connector)?),
+                    software_gamma: software_gamma_json(&color_for(&monitor.connector)?),
                     properties: filtered_properties_json(
                         &monitor.properties,
                         &MONITOR_PROPERTY_KEYS,
@@ -833,13 +860,16 @@ where
 fn build_summary_text<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
-    brightness_for: &F,
+    color_for: &F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
-    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+    F: Fn(&str) -> Result<CurrentColor, Box<dyn std::error::Error>>,
 {
     let format_brightness = |connector: &str| -> Result<String, Box<dyn std::error::Error>> {
-        Ok(brightness_for(connector)?.to_string())
+        Ok(color_for(connector)?.brightness_display())
+    };
+    let format_gamma = |connector: &str| -> Result<String, Box<dyn std::error::Error>> {
+        Ok(color_for(connector)?.gamma_display())
     };
 
     Ok(match &opts.connector {
@@ -860,6 +890,7 @@ where
                 "software brightness: {}",
                 format_brightness(connector)?
             )?;
+            writeln!(&mut output, "software gamma: {}", format_gamma(connector)?)?;
             output
         }
         None => {
@@ -873,10 +904,11 @@ where
             for monitor in &config.monitors {
                 writeln!(
                     &mut output,
-                    "\t{}: enabled={}, software brightness={}",
+                    "\t{}: enabled={}, software brightness={}, software gamma={}",
                     monitor.connector,
                     monitor_enabled(config, &monitor.connector),
-                    format_brightness(&monitor.connector)?
+                    format_brightness(&monitor.connector)?,
+                    format_gamma(&monitor.connector)?
                 )?;
             }
 
@@ -888,12 +920,12 @@ where
 fn build_structured_text<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
-    brightness_for: &F,
+    color_for: &F,
     verbose: bool,
     show_properties: bool,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
-    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+    F: Fn(&str) -> Result<CurrentColor, Box<dyn std::error::Error>>,
 {
     let selected = selected_monitors(opts, config)?;
     let mut output = String::new();
@@ -917,7 +949,7 @@ where
         &mut output,
         config,
         &selected.physical_monitors,
-        brightness_for,
+        color_for,
         verbose,
         show_properties,
     )?;
@@ -928,18 +960,16 @@ where
 fn build_text<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
-    brightness_for: &F,
+    color_for: &F,
     view: TextView,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
-    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+    F: Fn(&str) -> Result<CurrentColor, Box<dyn std::error::Error>>,
 {
     match view {
-        TextView::Default => {
-            build_structured_text(opts, config, brightness_for, false, opts.properties)
-        }
-        TextView::Summary => build_summary_text(opts, config, brightness_for),
-        TextView::Verbose => build_structured_text(opts, config, brightness_for, true, true),
+        TextView::Default => build_structured_text(opts, config, color_for, false, opts.properties),
+        TextView::Summary => build_summary_text(opts, config, color_for),
+        TextView::Verbose => build_structured_text(opts, config, color_for, true, true),
         TextView::ListMonitors | TextView::ListActiveMonitors => {
             let selected = selected_monitors(opts, config)?;
             build_list_monitors(config, &selected.logical_monitors)
@@ -955,8 +985,8 @@ pub fn handle(
     let view = validate_options(opts)?;
     let resources = Resources::get_resources(proxy)?;
 
-    let brightness_for =
-        |connector: &str| match brightness::load_current_brightness(connector, &resources, proxy) {
+    let color_for =
+        |connector: &str| match brightness::load_current_color(connector, &resources, proxy) {
             Ok(current) => Ok(current),
             Err(error)
                 if error
@@ -969,21 +999,22 @@ pub fn handle(
                     })
                     .unwrap_or(false) =>
             {
-                Ok(CurrentBrightness::unknown())
+                Ok(CurrentColor::unknown())
             }
             Err(error) => Err(error),
         };
 
     match view {
-        QueryView::Json => build_json(opts, config, &brightness_for),
-        QueryView::Text(view) => build_text(opts, config, &brightness_for, view),
+        QueryView::Json => build_json(opts, config, &color_for),
+        QueryView::Text(view) => build_text(opts, config, &color_for, view),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{build_json, build_text, validate_options, CommandOptions, QueryView, TextView};
-    use crate::cli::brightness::{CurrentBrightness, CurrentBrightnessState};
+    use crate::cli::brightness::{CurrentColor, CurrentColorState};
+    use gnome_randr::display_config::proxied_methods::{BrightnessFilter, GammaAdjustment};
     use gnome_randr::display_config::{
         logical_monitor::{LogicalMonitor, Monitor, Transform},
         physical_monitor::{KnownModeProperties, Mode, PhysicalMonitor},
@@ -1123,13 +1154,23 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
-            &|_connector| Ok(CurrentBrightness::managed(1.5, "filmic".parse().unwrap())),
+            &|_connector| {
+                Ok(CurrentColor::managed(
+                    1.5,
+                    "filmic".parse().unwrap(),
+                    GammaAdjustment {
+                        red: 1.1,
+                        green: 1.0,
+                        blue: 0.9,
+                    },
+                ))
+            },
         )
         .unwrap();
 
         let value: Value = serde_json::from_str(&output).unwrap();
 
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(value["renderer"], "native");
         assert_eq!(value["properties"]["compositor-capabilities"][0], "gamma");
         assert_eq!(value["logical_monitors"][0]["rotation"], "normal");
@@ -1160,6 +1201,9 @@ mod tests {
             value["monitors"][0]["software_brightness"]["filter"],
             "filmic"
         );
+        assert_eq!(value["monitors"][0]["software_gamma"]["red"], 1.1);
+        assert_eq!(value["monitors"][0]["software_gamma"]["green"], 1.0);
+        assert_eq!(value["monitors"][0]["software_gamma"]["blue"], 0.9);
         assert_eq!(value["monitors"][1]["connector"], "HDMI-1");
         assert_eq!(value["monitors"][1]["enabled"], false);
     }
@@ -1174,10 +1218,11 @@ mod tests {
             },
             &sample_config(),
             &|_connector| {
-                Ok(CurrentBrightness {
-                    state: CurrentBrightnessState::Unknown,
+                Ok(CurrentColor {
+                    state: CurrentColorState::Unknown,
                     brightness: None,
                     filter: None,
+                    gamma_adjustment: None,
                 })
             },
         )
@@ -1193,6 +1238,9 @@ mod tests {
         );
         assert!(value["monitors"][0]["software_brightness"]["brightness"].is_null());
         assert!(value["monitors"][0]["software_brightness"]["filter"].is_null());
+        assert!(value["monitors"][0]["software_gamma"]["red"].is_null());
+        assert!(value["monitors"][0]["software_gamma"]["green"].is_null());
+        assert!(value["monitors"][0]["software_gamma"]["blue"].is_null());
     }
 
     #[test]
@@ -1204,7 +1252,7 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
-            &|_connector| Ok(CurrentBrightness::unknown()),
+            &|_connector| Ok(CurrentColor::unknown()),
         )
         .unwrap();
 
@@ -1224,7 +1272,7 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
-            &|_connector| Ok(CurrentBrightness::identity()),
+            &|_connector| Ok(CurrentColor::identity()),
             TextView::Default,
         )
         .unwrap();
@@ -1247,7 +1295,17 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
-            &|_connector| Ok(CurrentBrightness::managed(1.25, "gamma".parse().unwrap())),
+            &|_connector| {
+                Ok(CurrentColor::managed(
+                    1.25,
+                    BrightnessFilter::Gamma,
+                    GammaAdjustment {
+                        red: 1.2,
+                        green: 1.1,
+                        blue: 1.0,
+                    },
+                ))
+            },
             TextView::Verbose,
         )
         .unwrap();
@@ -1256,6 +1314,7 @@ mod tests {
         assert!(output.contains("logical monitors:"));
         assert!(output.contains("display_name: Built-in display"));
         assert!(output.contains("software_brightness: 1.25 (gamma)"));
+        assert!(output.contains("software_gamma: 1.2:1.1:1"));
         assert!(output.contains("refresh_rate: 60"));
         assert!(output.contains("is_current: true"));
     }
@@ -1268,7 +1327,7 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
-            &|_connector| Ok(CurrentBrightness::unknown()),
+            &|_connector| Ok(CurrentColor::unknown()),
             TextView::Default,
         )
         .unwrap();
@@ -1277,6 +1336,7 @@ mod tests {
         assert!(output.contains("connector: HDMI-1"));
         assert!(output.contains("enabled: false"));
         assert!(output.contains("software_brightness: unknown"));
+        assert!(output.contains("software_gamma: unknown"));
     }
 
     #[test]
@@ -1289,9 +1349,9 @@ mod tests {
             &sample_config(),
             &|connector| {
                 if connector == "eDP-1" {
-                    Ok(CurrentBrightness::identity())
+                    Ok(CurrentColor::identity())
                 } else {
-                    Ok(CurrentBrightness::unknown())
+                    Ok(CurrentColor::unknown())
                 }
             },
             TextView::Summary,
@@ -1299,8 +1359,11 @@ mod tests {
         .unwrap();
 
         assert!(output.contains("outputs:"));
-        assert!(output.contains("eDP-1: enabled=true, software brightness=1 (linear)"));
-        assert!(output.contains("HDMI-1: enabled=false, software brightness=unknown"));
+        assert!(output
+            .contains("eDP-1: enabled=true, software brightness=1 (linear), software gamma=1"));
+        assert!(output.contains(
+            "HDMI-1: enabled=false, software brightness=unknown, software gamma=unknown"
+        ));
     }
 
     #[test]
@@ -1311,7 +1374,7 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
-            &|_connector| Ok(CurrentBrightness::identity()),
+            &|_connector| Ok(CurrentColor::identity()),
             TextView::ListMonitors,
         )
         .unwrap();

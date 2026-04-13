@@ -5,7 +5,7 @@ use gnome_randr::display_config::physical_monitor::Mode;
 use gnome_randr::{display_config::physical_monitor::PhysicalMonitor, DisplayConfig};
 
 use super::{
-    brightness::FILTER_VALUES,
+    brightness::{FILTER_VALUES, GAMMA_VALUES},
     common::{format_refresh, format_scale, parse_resolution},
 };
 
@@ -18,9 +18,11 @@ enum PendingValue {
     Rotate,
     Mode,
     Position,
+    ReferenceConnector,
     Scale,
     Refresh,
     Brightness,
+    Gamma,
     Filter,
 }
 
@@ -34,6 +36,9 @@ struct ParsedContext {
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum CompletionKind {
     Connector,
+    ReferenceConnector {
+        exclude: Option<String>,
+    },
     Rotate,
     Mode {
         connector: Option<String>,
@@ -46,6 +51,7 @@ enum CompletionKind {
         mode: Option<String>,
     },
     Brightness,
+    Gamma,
     Filter,
 }
 
@@ -117,9 +123,15 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
             ("modify", "--rotate") | ("modify", "-r") => Some(PendingValue::Rotate),
             ("modify", "--mode") | ("modify", "-m") => Some(PendingValue::Mode),
             ("modify", "--position") | ("modify", "--pos") => Some(PendingValue::Position),
+            ("modify", "--left-of")
+            | ("modify", "--right-of")
+            | ("modify", "--above")
+            | ("modify", "--below")
+            | ("modify", "--same-as") => Some(PendingValue::ReferenceConnector),
             ("modify", "--scale") => Some(PendingValue::Scale),
             ("modify", "--refresh") | ("modify", "--rate") => Some(PendingValue::Refresh),
             ("modify", "--brightness") => Some(PendingValue::Brightness),
+            ("modify", "--gamma") => Some(PendingValue::Gamma),
             ("modify", "--filter") => Some(PendingValue::Filter),
             _ if word.starts_with('-') => None,
             _ => {
@@ -207,7 +219,18 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
         ("modify", Some(("--brightness", fragment))) => {
             Some((CompletionKind::Brightness, fragment))
         }
+        ("modify", Some(("--gamma", fragment))) => Some((CompletionKind::Gamma, fragment)),
         ("modify", Some(("--filter", fragment))) => Some((CompletionKind::Filter, fragment)),
+        ("modify", Some(("--left-of", fragment)))
+        | ("modify", Some(("--right-of", fragment)))
+        | ("modify", Some(("--above", fragment)))
+        | ("modify", Some(("--below", fragment)))
+        | ("modify", Some(("--same-as", fragment))) => Some((
+            CompletionKind::ReferenceConnector {
+                exclude: context.connector.clone(),
+            },
+            fragment,
+        )),
         _ => None,
     };
 
@@ -231,6 +254,9 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             Some(PendingValue::Mode) => Some(CompletionKind::Mode {
                 connector: context.connector,
             }),
+            Some(PendingValue::ReferenceConnector) => Some(CompletionKind::ReferenceConnector {
+                exclude: context.connector,
+            }),
             Some(PendingValue::Scale) => Some(CompletionKind::Scale {
                 connector: context.connector,
             }),
@@ -240,6 +266,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             }),
             Some(PendingValue::Rotate) => Some(CompletionKind::Rotate),
             Some(PendingValue::Brightness) => Some(CompletionKind::Brightness),
+            Some(PendingValue::Gamma) => Some(CompletionKind::Gamma),
             Some(PendingValue::Filter) => Some(CompletionKind::Filter),
             _ => {
                 if connector_completion_requested(&context, current) {
@@ -266,6 +293,13 @@ fn completion_values(kind: CompletionKind, config: &DisplayConfig, current: &str
         CompletionKind::Connector => {
             for monitor in &config.monitors {
                 push_unique(&mut values, monitor.connector.clone());
+            }
+        }
+        CompletionKind::ReferenceConnector { exclude } => {
+            for monitor in &config.monitors {
+                if exclude.as_deref() != Some(monitor.connector.as_str()) {
+                    push_unique(&mut values, monitor.connector.clone());
+                }
             }
         }
         CompletionKind::Rotate => {
@@ -296,6 +330,9 @@ fn completion_values(kind: CompletionKind, config: &DisplayConfig, current: &str
         }
         CompletionKind::Brightness => {
             values.extend(BRIGHTNESS_VALUES.iter().map(|value| value.to_string()));
+        }
+        CompletionKind::Gamma => {
+            values.extend(GAMMA_VALUES.iter().map(|value| value.to_string()));
         }
         CompletionKind::Filter => {
             values.extend(FILTER_VALUES.iter().map(|value| value.to_string()));
@@ -330,6 +367,10 @@ pub fn try_handle(args: &[OsString]) -> Result<bool, Box<dyn std::error::Error>>
                         .collect(),
                     &request.current,
                 ),
+                CompletionKind::Gamma => filter_current(
+                    GAMMA_VALUES.iter().map(|value| value.to_string()).collect(),
+                    &request.current,
+                ),
                 CompletionKind::Rotate => filter_current(
                     ROTATION_VALUES
                         .iter()
@@ -337,6 +378,20 @@ pub fn try_handle(args: &[OsString]) -> Result<bool, Box<dyn std::error::Error>>
                         .collect(),
                     &request.current,
                 ),
+                CompletionKind::ReferenceConnector { exclude } => {
+                    let conn = Connection::new_session()?;
+                    let proxy = conn.with_proxy(
+                        "org.gnome.Mutter.DisplayConfig",
+                        "/org/gnome/Mutter/DisplayConfig",
+                        Duration::from_millis(5000),
+                    );
+                    let config = DisplayConfig::get_current_state(&proxy)?;
+                    completion_values(
+                        CompletionKind::ReferenceConnector { exclude },
+                        &config,
+                        &request.current,
+                    )
+                }
                 CompletionKind::Refresh { .. } => {
                     let conn = Connection::new_session()?;
                     let proxy = conn.with_proxy(
@@ -419,6 +474,31 @@ mod tests {
     }
 
     #[test]
+    fn modify_completes_reference_connector_values() {
+        assert_eq!(
+            completion_request(&words(&["modify", "eDP-1", "--left-of"]), ""),
+            Some(CompletionRequest {
+                kind: CompletionKind::ReferenceConnector {
+                    exclude: Some("eDP-1".to_string()),
+                },
+                current: String::new(),
+                prefix: String::new(),
+            })
+        );
+
+        assert_eq!(
+            completion_request(&words(&["modify", "eDP-1", "--same-as"]), ""),
+            Some(CompletionRequest {
+                kind: CompletionKind::ReferenceConnector {
+                    exclude: Some("eDP-1".to_string()),
+                },
+                current: String::new(),
+                prefix: String::new(),
+            })
+        );
+    }
+
+    #[test]
     fn modify_completes_mode_values_for_selected_connector() {
         assert_eq!(
             completion_request(&words(&["modify", "eDP-1", "--mode"]), ""),
@@ -475,6 +555,18 @@ mod tests {
     }
 
     #[test]
+    fn modify_completes_gamma_values() {
+        assert_eq!(
+            completion_request(&words(&["modify", "--gamma"]), ""),
+            Some(CompletionRequest {
+                kind: CompletionKind::Gamma,
+                current: String::new(),
+                prefix: String::new(),
+            })
+        );
+    }
+
+    #[test]
     fn modify_completes_filter_values() {
         assert_eq!(
             completion_request(&words(&["modify", "--filter"]), ""),
@@ -503,6 +595,15 @@ mod tests {
         );
 
         assert_eq!(
+            completion_request(&words(&["modify"]), "--gamma=1"),
+            Some(CompletionRequest {
+                kind: CompletionKind::Gamma,
+                current: "1".to_string(),
+                prefix: "--gamma=".to_string(),
+            })
+        );
+
+        assert_eq!(
             completion_request(&words(&["modify"]), "--filter=g"),
             Some(CompletionRequest {
                 kind: CompletionKind::Filter,
@@ -520,6 +621,28 @@ mod tests {
                 },
                 current: "6".to_string(),
                 prefix: "--rate=".to_string(),
+            })
+        );
+
+        assert_eq!(
+            completion_request(&words(&["modify", "eDP-1"]), "--left-of=h"),
+            Some(CompletionRequest {
+                kind: CompletionKind::ReferenceConnector {
+                    exclude: Some("eDP-1".to_string()),
+                },
+                current: "h".to_string(),
+                prefix: "--left-of=".to_string(),
+            })
+        );
+
+        assert_eq!(
+            completion_request(&words(&["modify", "eDP-1"]), "--same-as=h"),
+            Some(CompletionRequest {
+                kind: CompletionKind::ReferenceConnector {
+                    exclude: Some("eDP-1".to_string()),
+                },
+                current: "h".to_string(),
+                prefix: "--same-as=".to_string(),
             })
         );
     }

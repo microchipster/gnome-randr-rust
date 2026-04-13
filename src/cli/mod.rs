@@ -19,7 +19,7 @@ enum Command {
     )]
     Query(query::CommandOptions),
     #[structopt(
-        about = "Change one output using query values, including off, position, and preferred/refresh mode selection."
+        about = "Change one output using query values, including gamma, brightness, same-as mirroring, and layout controls."
     )]
     Modify(modify::CommandOptions),
     #[structopt(about = "Print completions for bash, zsh, or fish.")]
@@ -29,7 +29,7 @@ enum Command {
 #[derive(StructOpt)]
 #[structopt(
     about = "A program to query information about and manipulate displays on Gnome with Wayland.",
-    long_about = "A program to query information about and manipulate displays on Gnome with Wayland.\n\nDefault command is `query`. Run \"gnome-randr query\" first to list connector names such as \"eDP-1\" or \"HDMI-1\", whether each output is currently enabled, valid mode ids and scale factors, current software brightness state, and richer text views such as `--listmonitors`, `--verbose`, and `--properties`."
+    long_about = "A program to query information about and manipulate displays on Gnome with Wayland.\n\nDefault command is `query`. Run \"gnome-randr query\" first to list connector names such as \"eDP-1\" or \"HDMI-1\", whether each output is currently enabled, valid mode ids and scale factors, current software brightness and gamma state, and richer text views such as `--listmonitors`, `--verbose`, and `--properties`."
 )]
 struct CLI {
     #[structopt(subcommand)]

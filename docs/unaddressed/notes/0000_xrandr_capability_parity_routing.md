@@ -14,15 +14,12 @@ Capability parity matters more than syntax parity.
 
 ## What Is Already Landed
 
-- `query` can report logical monitor state, physical monitor state, enabled state for disabled outputs, software brightness state, JSON output, raw property maps, and xrandr-style logical monitor list views.
-- `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, disable outputs with `--off`, set absolute positions with `--position` / `--pos`, scale including displayed rounded scale values, rotation, primary or noprimary state, and software brightness, and it now plans changes through one full transactional config payload internally.
+- `query` can report logical monitor state, physical monitor state, enabled state for disabled outputs, software brightness state, software gamma state, JSON output, raw property maps, and xrandr-style logical monitor list views.
+- `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, disable outputs with `--off`, set absolute positions with `--position` / `--pos`, place outputs relative to each other with `--left-of` / `--right-of` / `--above` / `--below`, request same-as mirroring with local clone preflight, reflow adjacent layouts after geometry-changing rotations, scale including displayed rounded scale values, rotation, primary or noprimary state, software brightness, and software gamma, and it now plans changes through one full transactional config payload internally.
 - dynamic shell completions and single-monitor defaults are already in place.
 
 ## Ordered Follow-up Notes
 
-- `0070_add_relative_placement_and_fix_rotation_reflow.md`
-- `0080_add_same_as_clone_group_support_with_clear_mutter_limits.md`
-- `0090_add_software_gamma_controls.md`
 - `0100_add_reflection_and_supported_monitor_property_controls.md`
 - `0110_add_saved_profiles_and_apply_from_query_json.md`
 - `0120_add_wayland_native_backlight_power_save_and_layout_mode_controls.md`
@@ -32,19 +29,15 @@ Capability parity matters more than syntax parity.
 
 - `0020` through `0040` were the easiest parity wins and mostly extended existing query/modify flows.
 - `0050` established the architectural prerequisite for the bigger layout features.
-- `0060` established the first real topology-control slice after the planner; `0070` through `0080` cover the remaining relative-placement and mirroring controls from the historical issue backlog.
-- `0090` through `0120` expand output-control parity and Wayland-native capabilities after the layout foundation is solid.
+- `0060` through `0080` established the core topology-control foundation after the planner, including same-as mirroring where Mutter accepts it.
+- `0090` landed software gamma on top of the preserved LUT pipeline; `0100` through `0120` expand the remaining output-control parity and Wayland-native capabilities.
 - `0130` keeps the backlog honest about what the Mutter D-Bus backend can and cannot represent.
 
 ## Existing Backlog This Reroutes
 
-- `docs/unaddressed/issues/0020__Feature_Request___Mirroring_config.md`
-- `docs/unaddressed/issues/0021__Feature_Request___Add_capability_to_turn_off_screen_and_set.md`
-- `docs/unaddressed/issues/0027_when_try_to_rotate_left_or_right_encounter_error_D-Bus_error.md`
 - `docs/unaddressed/issues/0028_Can_t_change_mode.md`
 - `docs/unaddressed/issues/0009_Allow_reading_a_config_file.md`
 - `docs/unaddressed/issues/0030__Feature_Request__Allow_to_save_and_load_configs__like_autor.md`
-- `docs/unaddressed/prs/0018_Add_XY_movement___refactor_monitor_types.md`
 
 ## Success Criteria For The Whole Track
 

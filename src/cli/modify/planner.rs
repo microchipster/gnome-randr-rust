@@ -1,15 +1,64 @@
 use std::collections::HashMap;
 
 use gnome_randr::{
-    display_config::{logical_monitor::LogicalMonitor, ApplyConfig, ApplyMonitor},
+    display_config::{
+        logical_monitor::{LogicalMonitor, Transform},
+        physical_monitor::{Mode, PhysicalMonitor},
+        ApplyConfig, ApplyMonitor, LayoutMode,
+    },
     DisplayConfig,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelativePlacement {
+    LeftOf,
+    RightOf,
+    Above,
+    Below,
+}
+
+impl RelativePlacement {
+    pub fn describe(self) -> &'static str {
+        match self {
+            RelativePlacement::LeftOf => "left of",
+            RelativePlacement::RightOf => "right of",
+            RelativePlacement::Above => "above",
+            RelativePlacement::Below => "below",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Geometry {
+    fn right(self) -> i32 {
+        self.x + self.width
+    }
+
+    fn bottom(self) -> i32 {
+        self.y + self.height
+    }
+}
 
 #[derive(Debug)]
 pub enum Error {
     ConnectorNotFound(String),
     PhysicalMonitorNotFound(String),
     CurrentModeNotFound(String),
+    ModeNotFound {
+        connector: String,
+        mode_id: String,
+    },
+    SameLogicalMonitor {
+        connector: String,
+        reference: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -28,6 +77,19 @@ impl std::fmt::Display for Error {
                 "fatal: planner could not determine the current mode for {}.",
                 connector
             ),
+            Error::ModeNotFound { connector, mode_id } => write!(
+                f,
+                "fatal: planner could not find mode {} for connector {}.",
+                mode_id, connector
+            ),
+            Error::SameLogicalMonitor {
+                connector,
+                reference,
+            } => write!(
+                f,
+                "fatal: cannot place {} relative to {} because they belong to the same logical monitor.",
+                connector, reference
+            ),
         }
     }
 }
@@ -35,6 +97,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub struct MonitorPlanner<'a> {
+    display: &'a DisplayConfig,
     configs: Vec<ApplyConfig<'a>>,
     connector_to_config: HashMap<&'a str, usize>,
 }
@@ -56,6 +119,7 @@ impl<'a> MonitorPlanner<'a> {
         }
 
         Ok(Self {
+            display: config,
             configs,
             connector_to_config,
         })
@@ -113,6 +177,64 @@ impl<'a> MonitorPlanner<'a> {
         Ok(&mut self.configs[index])
     }
 
+    fn physical_monitor(&self, connector: &str) -> Result<&'a PhysicalMonitor, Error> {
+        self.display
+            .physical_monitor(connector)
+            .ok_or_else(|| Error::PhysicalMonitorNotFound(connector.to_string()))
+    }
+
+    fn mode_for_monitor(&self, connector: &str, mode_id: &str) -> Result<&'a Mode, Error> {
+        self.physical_monitor(connector)?
+            .modes
+            .iter()
+            .find(|mode| mode.id == mode_id)
+            .ok_or_else(|| Error::ModeNotFound {
+                connector: connector.to_string(),
+                mode_id: mode_id.to_string(),
+            })
+    }
+
+    fn config_geometry(&self, index: usize) -> Result<Geometry, Error> {
+        let config = &self.configs[index];
+        let mut width = 0;
+        let mut height = 0;
+
+        for monitor in &config.monitors {
+            let mode = self.mode_for_monitor(monitor.connector, monitor.mode_id)?;
+            width = width.max(mode.width);
+            height = height.max(mode.height);
+        }
+
+        let (mut width, mut height) = match self.display.known_properties.layout_mode {
+            LayoutMode::Logical if config.scale > 0.0 => (
+                ((width as f64) / config.scale).round() as i32,
+                ((height as f64) / config.scale).round() as i32,
+            ),
+            _ => (width, height),
+        };
+
+        let rotation = config.transform & Transform::R270.bits();
+        if rotation == Transform::R90.bits() || rotation == Transform::R270.bits() {
+            std::mem::swap(&mut width, &mut height);
+        }
+
+        Ok(Geometry {
+            x: config.x_pos,
+            y: config.y_pos,
+            width,
+            height,
+        })
+    }
+
+    pub fn geometry(&self, connector: &str) -> Result<Geometry, Error> {
+        self.config_geometry(self.target_index(connector)?)
+    }
+
+    pub fn position(&self, connector: &str) -> Result<(i32, i32), Error> {
+        let geometry = self.geometry(connector)?;
+        Ok((geometry.x, geometry.y))
+    }
+
     pub fn set_mode(&mut self, connector: &str, mode_id: &'a str) -> Result<(), Error> {
         let config = self.target_config_mut(connector)?;
         let monitor = config
@@ -148,7 +270,6 @@ impl<'a> MonitorPlanner<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn set_position(&mut self, connector: &str, x: i32, y: i32) -> Result<(), Error> {
         let config = self.target_config_mut(connector)?;
         config.x_pos = x;
@@ -156,8 +277,80 @@ impl<'a> MonitorPlanner<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    pub fn place_relative(
+        &mut self,
+        connector: &str,
+        reference: &str,
+        placement: RelativePlacement,
+    ) -> Result<(i32, i32), Error> {
+        let target_index = self.target_index(connector)?;
+        let reference_index = self.target_index(reference)?;
+        if target_index == reference_index {
+            return Err(Error::SameLogicalMonitor {
+                connector: connector.to_string(),
+                reference: reference.to_string(),
+            });
+        }
+
+        let target = self.config_geometry(target_index)?;
+        let reference_geometry = self.config_geometry(reference_index)?;
+        let (x, y) = match placement {
+            RelativePlacement::LeftOf => {
+                (reference_geometry.x - target.width, reference_geometry.y)
+            }
+            RelativePlacement::RightOf => (reference_geometry.right(), reference_geometry.y),
+            RelativePlacement::Above => {
+                (reference_geometry.x, reference_geometry.y - target.height)
+            }
+            RelativePlacement::Below => (reference_geometry.x, reference_geometry.bottom()),
+        };
+
+        let config = &mut self.configs[target_index];
+        config.x_pos = x;
+        config.y_pos = y;
+        Ok((x, y))
+    }
+
+    pub fn reflow_after_geometry_change(
+        &mut self,
+        connector: &str,
+        old_geometry: Geometry,
+    ) -> Result<(), Error> {
+        let target_index = self.target_index(connector)?;
+        let new_geometry = self.config_geometry(target_index)?;
+        let delta_width = new_geometry.width - old_geometry.width;
+        let delta_height = new_geometry.height - old_geometry.height;
+
+        if delta_width == 0 && delta_height == 0 {
+            return Ok(());
+        }
+
+        let old_right = old_geometry.right();
+        let old_bottom = old_geometry.bottom();
+
+        for (index, config) in self.configs.iter_mut().enumerate() {
+            if index == target_index {
+                continue;
+            }
+
+            if delta_width != 0 && config.x_pos >= old_right {
+                config.x_pos += delta_width;
+            }
+
+            if delta_height != 0 && config.y_pos >= old_bottom {
+                config.y_pos += delta_height;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn remove_output(&mut self, connector: &str) -> Result<(), Error> {
+        self.detach_connector(connector)?;
+        Ok(())
+    }
+
+    fn detach_connector(&mut self, connector: &str) -> Result<(), Error> {
         let index = self.target_index(connector)?;
         self.configs[index]
             .monitors
@@ -178,6 +371,41 @@ impl<'a> MonitorPlanner<'a> {
         Ok(())
     }
 
+    pub fn clone_with(
+        &mut self,
+        connector: &str,
+        reference: &str,
+        mode_id: &'a str,
+    ) -> Result<(), Error> {
+        if connector != reference {
+            if let Some(target_index) = self.connector_to_config.get(connector).copied() {
+                if target_index != self.target_index(reference)? {
+                    self.detach_connector(connector)?;
+                }
+            }
+        }
+
+        let reference_index = self.target_index(reference)?;
+        let connector_ref = &self.physical_monitor(connector)?.connector;
+        let config = &mut self.configs[reference_index];
+
+        if let Some(monitor) = config
+            .monitors
+            .iter_mut()
+            .find(|monitor| monitor.connector == connector_ref)
+        {
+            monitor.mode_id = mode_id;
+        } else {
+            config.monitors.push(ApplyMonitor {
+                connector: connector_ref,
+                mode_id,
+            });
+        }
+
+        self.rebuild_index();
+        Ok(())
+    }
+
     fn rebuild_index(&mut self) {
         self.connector_to_config.clear();
 
@@ -195,18 +423,18 @@ impl<'a> MonitorPlanner<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::MonitorPlanner;
+    use super::{Geometry, MonitorPlanner, RelativePlacement};
     use gnome_randr::display_config::{
         logical_monitor::{LogicalMonitor, Monitor, Transform},
         physical_monitor::{KnownModeProperties, Mode, PhysicalMonitor},
         DisplayConfig, KnownProperties, LayoutMode,
     };
 
-    fn mode(id: &str, is_current: bool, is_preferred: bool) -> Mode {
+    fn mode(id: &str, width: i32, height: i32, is_current: bool, is_preferred: bool) -> Mode {
         Mode {
             id: id.to_string(),
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             refresh_rate: 60.0,
             preferred_scale: 1.0,
             supported_scales: vec![1.0, 2.0],
@@ -218,13 +446,13 @@ mod tests {
         }
     }
 
-    fn physical_monitor(connector: &str, current_mode: &str) -> PhysicalMonitor {
+    fn physical_monitor(connector: &str, modes: Vec<Mode>) -> PhysicalMonitor {
         PhysicalMonitor {
             connector: connector.to_string(),
             vendor: "Vendor".to_string(),
             product: "Product".to_string(),
             serial: format!("serial-{}", connector),
-            modes: vec![mode(current_mode, true, true)],
+            modes,
             properties: Default::default(),
         }
     }
@@ -242,9 +470,25 @@ mod tests {
         DisplayConfig {
             serial: 1,
             monitors: vec![
-                physical_monitor("eDP-1", "1920x1080@60"),
-                physical_monitor("HDMI-1", "2560x1440@60"),
-                physical_monitor("DP-1", "2560x1440@75"),
+                physical_monitor(
+                    "eDP-1",
+                    vec![
+                        mode("1920x1080@60", 1920, 1080, true, true),
+                        mode("1080x1920@60", 1080, 1920, false, false),
+                    ],
+                ),
+                physical_monitor("HDMI-1", vec![mode("2560x1440@60", 2560, 1440, true, true)]),
+                physical_monitor(
+                    "DP-1",
+                    vec![
+                        mode("2560x1440@75", 2560, 1440, true, true),
+                        mode("2560x1440@60", 2560, 1440, false, false),
+                    ],
+                ),
+                physical_monitor(
+                    "USB-C-1",
+                    vec![mode("2560x1440@60", 2560, 1440, false, true)],
+                ),
             ],
             logical_monitors: vec![
                 LogicalMonitor {
@@ -324,5 +568,110 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].monitors.len(), 1);
         assert_eq!(configs[0].monitors[0].connector, "eDP-1");
+    }
+
+    #[test]
+    fn relative_placement_uses_final_rotated_geometry() {
+        let config = sample_config();
+        let mut planner = MonitorPlanner::new(&config).unwrap();
+        planner
+            .set_transform("eDP-1", Transform::R90.bits())
+            .unwrap();
+
+        let position = planner
+            .place_relative("eDP-1", "HDMI-1", RelativePlacement::LeftOf)
+            .unwrap();
+        assert_eq!(position, (840, 0));
+        assert_eq!(planner.position("eDP-1").unwrap(), (840, 0));
+    }
+
+    #[test]
+    fn reflow_moves_right_neighbors_after_rotation_changes_width() {
+        let config = sample_config();
+        let mut planner = MonitorPlanner::new(&config).unwrap();
+        let old_geometry = planner.geometry("eDP-1").unwrap();
+
+        planner
+            .set_transform("eDP-1", Transform::R90.bits())
+            .unwrap();
+        planner
+            .reflow_after_geometry_change("eDP-1", old_geometry)
+            .unwrap();
+
+        assert_eq!(planner.position("HDMI-1").unwrap(), (1080, 0));
+        assert_eq!(planner.geometry("eDP-1").unwrap().width, 1080);
+    }
+
+    #[test]
+    fn relative_placement_rejects_same_logical_monitor_reference() {
+        let config = sample_config();
+        let mut planner = MonitorPlanner::new(&config).unwrap();
+        let error = planner
+            .place_relative("HDMI-1", "DP-1", RelativePlacement::RightOf)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("belong to the same logical monitor"));
+    }
+
+    #[test]
+    fn geometry_reflects_layout_mode_scaling() {
+        let mut config = sample_config();
+        config.logical_monitors[0].scale = 2.0;
+        let planner = MonitorPlanner::new(&config).unwrap();
+
+        assert_eq!(
+            planner.geometry("eDP-1").unwrap(),
+            Geometry {
+                x: 0,
+                y: 0,
+                width: 960,
+                height: 540,
+            }
+        );
+    }
+
+    #[test]
+    fn clone_with_moves_connector_into_reference_group() {
+        let config = sample_config();
+        let mut planner = MonitorPlanner::new(&config).unwrap();
+
+        planner
+            .clone_with("eDP-1", "HDMI-1", "1920x1080@60")
+            .unwrap();
+
+        let configs = planner.into_configs();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].monitors.len(), 3);
+        assert!(configs[0]
+            .monitors
+            .iter()
+            .any(|monitor| monitor.connector == "eDP-1"));
+        assert!(configs[0]
+            .monitors
+            .iter()
+            .any(|monitor| monitor.connector == "HDMI-1"));
+        assert!(configs[0]
+            .monitors
+            .iter()
+            .any(|monitor| monitor.connector == "DP-1"));
+    }
+
+    #[test]
+    fn clone_with_can_add_disabled_output_to_reference_group() {
+        let config = sample_config();
+        let mut planner = MonitorPlanner::new(&config).unwrap();
+
+        planner
+            .clone_with("USB-C-1", "HDMI-1", "2560x1440@60")
+            .unwrap();
+
+        let configs = planner.into_configs();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[1].monitors.len(), 3);
+        assert!(configs[1]
+            .monitors
+            .iter()
+            .any(|monitor| monitor.connector == "USB-C-1"));
     }
 }

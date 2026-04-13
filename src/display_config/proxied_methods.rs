@@ -145,6 +145,97 @@ impl std::str::FromStr for BrightnessFilter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GammaAdjustment {
+    pub red: f64,
+    pub green: f64,
+    pub blue: f64,
+}
+
+impl GammaAdjustment {
+    pub const fn identity() -> GammaAdjustment {
+        GammaAdjustment {
+            red: 1.0,
+            green: 1.0,
+            blue: 1.0,
+        }
+    }
+
+    pub fn is_identity(self) -> bool {
+        (self.red - 1.0).abs() <= f64::EPSILON
+            && (self.green - 1.0).abs() <= f64::EPSILON
+            && (self.blue - 1.0).abs() <= f64::EPSILON
+    }
+}
+
+impl Default for GammaAdjustment {
+    fn default() -> Self {
+        GammaAdjustment::identity()
+    }
+}
+
+impl std::fmt::Display for GammaAdjustment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let format_component = |value: f64| {
+            format!("{:.3}", value)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+        };
+
+        if (self.red - self.green).abs() <= f64::EPSILON
+            && (self.red - self.blue).abs() <= f64::EPSILON
+        {
+            write!(f, "{}", format_component(self.red))
+        } else {
+            write!(
+                f,
+                "{}:{}:{}",
+                format_component(self.red),
+                format_component(self.green),
+                format_component(self.blue)
+            )
+        }
+    }
+}
+
+impl std::str::FromStr for GammaAdjustment {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let parts = value.split(':').collect::<Vec<_>>();
+        let parse_component = |component: &str| -> std::result::Result<f64, String> {
+            let parsed = component
+                .parse::<f64>()
+                .map_err(|_| format!("invalid gamma value: {}", component))?;
+            if !parsed.is_finite() || parsed <= 0.0 {
+                return Err(format!("invalid gamma value: {}", component));
+            }
+            Ok(parsed)
+        };
+
+        match parts.as_slice() {
+            [red] => {
+                let red = parse_component(red)?;
+                Ok(GammaAdjustment {
+                    red,
+                    green: red,
+                    blue: red,
+                })
+            }
+            [red, green, blue] => Ok(GammaAdjustment {
+                red: parse_component(red)?,
+                green: parse_component(green)?,
+                blue: parse_component(blue)?,
+            }),
+            _ => Err(format!(
+                "invalid gamma value: {}. Use R or R:G:B, for example 1 or 1.1:1.0:0.9",
+                value
+            )),
+        }
+    }
+}
+
 impl Gamma {
     pub fn from(result: (Vec<u16>, Vec<u16>, Vec<u16>)) -> Gamma {
         Gamma {
@@ -192,6 +283,40 @@ impl Gamma {
             green: scale_channel(&self.green),
             blue: scale_channel(&self.blue),
         }
+    }
+
+    pub fn apply_gamma_adjustment(&self, adjustment: GammaAdjustment) -> Gamma {
+        let max = f64::from(u16::MAX);
+        let adjust_channel = |channel: &[u16], gamma: f64| {
+            channel
+                .iter()
+                .map(|value| {
+                    if *value == 0 {
+                        return 0;
+                    }
+
+                    let normalized = f64::from(*value) / max;
+                    let adjusted = normalized.powf(gamma.recip());
+                    (adjusted * max).round().clamp(0.0, max) as u16
+                })
+                .collect()
+        };
+
+        Gamma {
+            red: adjust_channel(&self.red, adjustment.red),
+            green: adjust_channel(&self.green, adjustment.green),
+            blue: adjust_channel(&self.blue, adjustment.blue),
+        }
+    }
+
+    pub fn apply_software_color(
+        &self,
+        brightness: f64,
+        filter: BrightnessFilter,
+        gamma_adjustment: GammaAdjustment,
+    ) -> Gamma {
+        self.apply_gamma_adjustment(gamma_adjustment)
+            .apply_brightness(brightness, filter)
     }
 
     pub fn approx_eq(&self, other: &Gamma) -> bool {
@@ -255,7 +380,7 @@ impl Resources {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrightnessFilter, Gamma};
+    use super::{BrightnessFilter, Gamma, GammaAdjustment};
 
     #[test]
     fn scaling_gamma_preserves_channel_shape() {
@@ -330,5 +455,58 @@ mod tests {
         };
 
         assert!(gamma.is_identity());
+    }
+
+    #[test]
+    fn gamma_adjustment_is_identity_at_one() {
+        let gamma = Gamma {
+            red: vec![0, 1000, 2000],
+            green: vec![0, 1500, 3000],
+            blue: vec![0, 2000, 4000],
+        };
+
+        let adjusted = gamma.apply_gamma_adjustment(GammaAdjustment::identity());
+
+        assert!(adjusted.approx_eq(&gamma));
+    }
+
+    #[test]
+    fn gamma_adjustment_changes_channels_independently() {
+        let gamma = Gamma {
+            red: vec![0, 16384, 32768, 65535],
+            green: vec![0, 16384, 32768, 65535],
+            blue: vec![0, 16384, 32768, 65535],
+        };
+
+        let adjusted = gamma.apply_gamma_adjustment(GammaAdjustment {
+            red: 2.0,
+            green: 1.0,
+            blue: 0.5,
+        });
+
+        assert!(adjusted.red[2] > gamma.red[2]);
+        assert_eq!(adjusted.green, gamma.green);
+        assert!(adjusted.blue[2] < gamma.blue[2]);
+    }
+
+    #[test]
+    fn software_color_applies_gamma_before_brightness() {
+        let gamma = Gamma {
+            red: vec![0, 16384, 32768, 65535],
+            green: vec![0, 16384, 32768, 65535],
+            blue: vec![0, 16384, 32768, 65535],
+        };
+        let adjustment = GammaAdjustment {
+            red: 2.0,
+            green: 2.0,
+            blue: 2.0,
+        };
+
+        let combined = gamma.apply_software_color(1.5, BrightnessFilter::Linear, adjustment);
+        let sequential = gamma
+            .apply_gamma_adjustment(adjustment)
+            .apply_brightness(1.5, BrightnessFilter::Linear);
+
+        assert!(combined.approx_eq(&sequential));
     }
 }
