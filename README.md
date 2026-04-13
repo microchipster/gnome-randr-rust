@@ -17,6 +17,17 @@ To install this tool, run `cargo install gnome-randr`. A library is also exposed
 
 Shell completions can be generated with `gnome-randr completions bash`, `gnome-randr completions zsh`, or `gnome-randr completions fish`. These are generated from the current CLI definition at runtime, with dynamic live completions for monitor-dependent values.
 
+## Capability parity status
+
+`gnome-randr` is aiming for `xrandr` capability parity with a more modern Wayland-first CLI, not argument-for-argument syntax parity.
+
+- Implemented: query text/summary/JSON output, mode selection by id, scale, rotation, primary, software brightness with filters, dynamic shell completions, and current software brightness reporting in `query`
+- Planned next: accepting displayed scale values directly, `preferred` / `auto` / refresh-oriented mode selection, richer query views, a transactional multi-output planner, real output disable, relative placement, mirroring, software gamma, and saved profiles
+- Limited by Mutter: some mirror layouts and layout-mode changes depend on what the current `org.gnome.Mutter.DisplayConfig` backend accepts at apply time
+- Unsupported with the current backend: custom modelines, arbitrary transform matrices and panning, X11 provider/CRTC controls, and framebuffer/DPI compatibility flags
+
+See `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md` for the active ordered roadmap.
+
 ## JSON output
 
 `gnome-randr query --json` prints a documented machine-readable schema for scripts. `gnome-randr query CONNECTOR --json` uses the same schema, filtered down to the requested connector. `--summary` is text-only and cannot be combined with `--json`.

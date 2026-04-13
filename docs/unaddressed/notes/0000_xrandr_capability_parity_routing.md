@@ -20,7 +20,6 @@ Capability parity matters more than syntax parity.
 
 ## Ordered Follow-up Notes
 
-- `0010_reconcile_recent_work_with_the_backlog_and_publish_a_parity_matrix.md`
 - `0020_accept_displayed_scale_values_when_matching_supported_scales.md`
 - `0030_add_preferred_auto_refresh_and_noprimary_to_modify.md`
 - `0040_add_richer_query_views_and_property_inspection.md`
@@ -51,7 +50,6 @@ Capability parity matters more than syntax parity.
 - `docs/unaddressed/issues/0027_when_try_to_rotate_left_or_right_encounter_error_D-Bus_error.md`
 - `docs/unaddressed/issues/0028_Can_t_change_mode.md`
 - `docs/unaddressed/issues/0009_Allow_reading_a_config_file.md`
-- `docs/unaddressed/issues/0012_Allow_dumping_the_current_configuration_to_stdout.md`
 - `docs/unaddressed/issues/0030__Feature_Request__Allow_to_save_and_load_configs__like_autor.md`
 - `docs/unaddressed/prs/0018_Add_XY_movement___refactor_monitor_types.md`
 

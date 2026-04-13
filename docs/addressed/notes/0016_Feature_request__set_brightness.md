@@ -149,3 +149,38 @@ I hope to have a feedback about this suggestion soon :)
 @zampitek I believe the problem is less one of a technical nature and more of a mathematical nature - I think I'm being provided all the information necessary to adjust it appropriately, but the formula I've found only handles it correctly when there isn't a color profile applied. I'm not very strong in math, never did linear algebra/differential equations, so I don't really know how to correct for that. One day I might decide to look into it, but not at the current moment. 
 
 You're welcome to try and correct my math though if you're more comfortable with it than me!
+
+## How This Was Addressed
+
+This feature is shipped under `modify`, not the old experimental `adjust` command.
+
+The real fix was not to keep trying to infer a simplified gamma curve from the current LUT. Instead, the implementation now reads the current CRTC gamma ramp from Mutter and applies brightness directly to the existing LUT so Night Light, ICC profiles, and other non-neutral ramps are preserved rather than reconstructed incorrectly.
+
+Concrete file pointers:
+
+- `src/cli/brightness.rs`
+- `src/cli/modify/mod.rs`
+- `src/cli/query.rs`
+- `src/display_config/proxied_methods.rs`
+
+The landed behavior includes:
+
+- `gnome-randr modify [CONNECTOR] --brightness <factor>`
+- `--filter linear|gamma|filmic`
+- query-time reporting of the current managed brightness and filter state
+- baseline reuse logic so repeated absolute brightness calls do not compound unexpectedly when the current gamma still matches the last tool-managed state
+
+## How To Exercise And Test It
+
+- inspect current brightness state:
+  - `cargo run -- query --summary`
+- preview a brightness change without applying it:
+  - `cargo run -- modify --dry-run --brightness 1.25 --filter filmic`
+- apply a real brightness change on one connector:
+  - `cargo run -- modify eDP-1 --brightness 1.25 --filter filmic`
+- verify the reported state after applying it:
+  - `cargo run -- query eDP-1 --summary`
+- practical correctness check when Night Light or another color adjustment is active:
+  - enable the external color adjustment first
+  - run `gnome-randr modify CONNECTOR --brightness 0.75`
+  - confirm the color cast stays intact while only brightness changes

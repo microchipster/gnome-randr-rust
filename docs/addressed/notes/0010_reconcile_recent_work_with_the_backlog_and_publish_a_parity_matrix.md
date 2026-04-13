@@ -36,3 +36,28 @@ This is the lowest-effort, highest-clarity slice before more feature work lands.
 
 - do not fold new feature work into this cleanup note
 - after this lands, the next implementation note should be `0020_accept_displayed_scale_values_when_matching_supported_scales.md`
+
+## How This Was Addressed
+
+- moved completed notes out of `docs/unaddressed/` and into `docs/addressed/notes/` so the active backlog only contains real remaining work
+- published a concise capability-parity status section in `README.md` that distinguishes implemented features, planned work, Mutter-limited areas, and unsupported backend mismatches
+- updated `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md` so the next active slice is `0020_accept_displayed_scale_values_when_matching_supported_scales.md`
+- left `docs/unaddressed/issues/0024_Installation.md` active because only part of it is already covered by the README; the remaining install-path and naming questions are still open
+
+Concrete file pointers:
+
+- `README.md`
+- `docs/addressed/notes/0010_reconcile_recent_work_with_the_backlog_and_publish_a_parity_matrix.md`
+- `docs/addressed/notes/0012_Allow_dumping_the_current_configuration_to_stdout.md`
+- `docs/addressed/notes/0016_Feature_request__set_brightness.md`
+- `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md`
+
+## How To Exercise And Test It
+
+- confirm the addressed notes exist:
+  - `ls docs/addressed/notes`
+- confirm the next active roadmap note is now `0020`:
+  - `ls docs/unaddressed/notes`
+  - read `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md`
+- read the parity summary in `README.md` and make sure it matches the current shipped feature surface
+- sanity-check that old completed items are no longer under `docs/unaddressed/issues/`
