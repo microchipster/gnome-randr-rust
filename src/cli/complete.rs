@@ -17,6 +17,7 @@ const ROTATION_VALUES: &[&str] = &["normal", "left", "right", "inverted"];
 enum PendingValue {
     Rotate,
     Mode,
+    Position,
     Scale,
     Refresh,
     Brightness,
@@ -67,8 +68,8 @@ fn select_monitors<'a>(
 ) -> Vec<&'a PhysicalMonitor> {
     match connector {
         Some(connector) => config
-            .search(connector)
-            .map(|(_, physical_monitor)| vec![physical_monitor])
+            .physical_monitor(connector)
+            .map(|physical_monitor| vec![physical_monitor])
             .unwrap_or_default(),
         None => config.monitors.iter().collect(),
     }
@@ -93,8 +94,10 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
 
     for word in words {
         if let Some(pending) = pending_value.take() {
-            if pending == PendingValue::Mode {
-                mode = Some(word.clone());
+            match pending {
+                PendingValue::Mode => mode = Some(word.clone()),
+                PendingValue::Position => {}
+                _ => {}
             }
             continue;
         }
@@ -113,6 +116,7 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
             }
             ("modify", "--rotate") | ("modify", "-r") => Some(PendingValue::Rotate),
             ("modify", "--mode") | ("modify", "-m") => Some(PendingValue::Mode),
+            ("modify", "--position") | ("modify", "--pos") => Some(PendingValue::Position),
             ("modify", "--scale") => Some(PendingValue::Scale),
             ("modify", "--refresh") | ("modify", "--rate") => Some(PendingValue::Refresh),
             ("modify", "--brightness") => Some(PendingValue::Brightness),

@@ -21,8 +21,8 @@ Shell completions can be generated with `gnome-randr completions bash`, `gnome-r
 
 `gnome-randr` is aiming for `xrandr` capability parity with a more modern Wayland-first CLI, not argument-for-argument syntax parity.
 
-- Implemented: query text/summary/JSON output, `query --verbose`, `query --properties`, `query --listmonitors`, `query --listactivemonitors`, mode selection by id or resolution with `--refresh`, `--preferred`, `--auto`, `--primary` / `--noprimary`, scale including the rounded values shown in `query`, rotation, software brightness with filters, dynamic shell completions, and current software brightness reporting in `query`
-- Planned next: a transactional multi-output planner, real output disable, relative placement, mirroring, software gamma, and saved profiles
+- Implemented: query text/summary/JSON output, `query --verbose`, `query --properties`, `query --listmonitors`, `query --listactivemonitors`, enabled-state reporting for disabled outputs, mode selection by id or resolution with `--refresh`, `--preferred`, `--auto`, `--primary` / `--noprimary`, real `modify --off`, absolute `modify --position` / `--pos`, scale including the rounded values shown in `query`, rotation, software brightness with filters, dynamic shell completions, current software brightness reporting in `query`, and an internal transactional full-config planner behind `modify`
+- Planned next: relative placement, mirroring, software gamma, and saved profiles
 - Limited by Mutter: some mirror layouts and layout-mode changes depend on what the current `org.gnome.Mutter.DisplayConfig` backend accepts at apply time
 - Unsupported with the current backend: custom modelines, arbitrary transform matrices and panning, X11 provider/CRTC controls, and framebuffer/DPI compatibility flags
 
@@ -34,16 +34,17 @@ See `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md` for the ac
 - `gnome-randr query --listactivemonitors` prints the active logical-monitor list. With the current Mutter query surface this usually matches `--listmonitors`.
 - `gnome-randr query --properties` adds raw monitor and mode property maps to the text UI, including values such as underscanning-related state when Mutter exposes them.
 - `gnome-randr query CONNECTOR --verbose` prints a more detailed inspection view using the same field names as the JSON schema.
+- Disabled-but-still-connected outputs remain queryable by connector and now report `enabled: false` in text output.
 
 ## JSON output
 
-`gnome-randr query --json` prints a documented machine-readable schema for scripts. `gnome-randr query CONNECTOR --json` uses the same schema, filtered down to the requested connector. `--summary`, `--properties`, `--listmonitors`, and `--listactivemonitors` are text-only views and cannot be combined with `--json`.
+`gnome-randr query --json` prints a documented machine-readable schema for scripts. `gnome-randr query CONNECTOR --json` uses the same schema, filtered down to the requested connector, even when that connector is currently disabled. `--summary`, `--properties`, `--listmonitors`, and `--listactivemonitors` are text-only views and cannot be combined with `--json`.
 
-Schema version `2` currently contains:
+Schema version `3` currently contains:
 
 - top-level metadata: `schema_version`, `serial`, `layout_mode`, `supports_mirroring`, `supports_changing_layout_mode`, `global_scale_required`, optional `renderer`, and optional raw `properties`
 - `logical_monitors`: objects with `x`, `y`, `scale`, `rotation`, `primary`, associated `monitors`, and optional raw `properties`
-- `monitors`: physical outputs with identity fields, optional `display_name` / `is_builtin` / `width_mm` / `height_mm`, supported `modes`, `software_brightness`, and optional raw `properties`
+- `monitors`: physical outputs with identity fields, `enabled`, optional `display_name` / `is_builtin` / `width_mm` / `height_mm`, supported `modes`, `software_brightness`, and optional raw `properties`
 - each mode includes `id`, `width`, `height`, `refresh_rate`, `preferred_scale`, `supported_scales`, `is_current`, `is_preferred`, and optional raw `properties`
 - `software_brightness.state` is one of `managed`, `identity`, or `unknown`
 - when `software_brightness.state` is `managed` or `identity`, `brightness` and `filter` are populated; otherwise they are `null`
@@ -52,7 +53,7 @@ Example:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "serial": 42,
   "layout_mode": "physical",
   "supports_mirroring": true,
@@ -85,6 +86,7 @@ Example:
   "monitors": [
     {
       "connector": "eDP-1",
+      "enabled": true,
       "vendor": "BOE",
       "product": "0x07c9",
       "serial": "0x00000000",
@@ -139,6 +141,9 @@ gnome-randr query eDP-1 --json | jq '.monitors[0].software_brightness'
 
 # inspect raw monitor properties when present
 gnome-randr query --json | jq '.monitors[] | {connector, properties}'
+
+# list connectors and whether they are currently enabled
+gnome-randr query --json | jq -r '.monitors[] | "\(.connector)\t\(.enabled)"'
 ```
 
 ## Method

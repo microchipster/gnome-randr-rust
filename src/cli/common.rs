@@ -64,6 +64,14 @@ pub fn parse_resolution(value: &str) -> Option<(i32, i32)> {
     Some((width.parse().ok()?, height.parse().ok()?))
 }
 
+pub fn parse_position(value: &str) -> Option<(i32, i32)> {
+    let (x, y) = value
+        .split_once(',')
+        .or_else(|| value.rsplit_once('x'))
+        .or_else(|| value.rsplit_once('X'))?;
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
 const DISPLAYED_SCALE_TOLERANCE: f64 = 0.005_001;
 
 pub fn match_supported_scale(requested: f64, supported_scales: &[f64]) -> Option<f64> {
@@ -90,8 +98,8 @@ pub fn match_supported_scale(requested: f64, supported_scales: &[f64]) -> Option
 #[cfg(test)]
 mod tests {
     use super::{
-        format_refresh, format_scale, match_supported_scale, parse_resolution, resolve_connector,
-        ConnectorError,
+        format_refresh, format_scale, match_supported_scale, parse_position, parse_resolution,
+        resolve_connector, ConnectorError,
     };
 
     #[test]
@@ -129,6 +137,13 @@ mod tests {
         assert_eq!(parse_resolution("1920x1080"), Some((1920, 1080)));
         assert_eq!(parse_resolution("1920xfoo"), None);
         assert_eq!(parse_resolution("1920"), None);
+    }
+
+    #[test]
+    fn position_parser_accepts_comma_and_x_forms() {
+        assert_eq!(parse_position("100,200"), Some((100, 200)));
+        assert_eq!(parse_position("-1920x0"), Some((-1920, 0)));
+        assert_eq!(parse_position("100xfoo"), None);
     }
 
     #[test]

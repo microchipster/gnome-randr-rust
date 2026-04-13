@@ -1,10 +1,9 @@
-mod actions;
+mod planner;
 
 use std::cmp::Ordering;
 
 use gnome_randr::display_config::proxied_methods::BrightnessFilter;
 use gnome_randr::{
-    display_config::ApplyConfig,
     display_config::{
         physical_monitor::Mode, physical_monitor::PhysicalMonitor, resources::Resources,
     },
@@ -12,11 +11,36 @@ use gnome_randr::{
 };
 use structopt::StructOpt;
 
-use self::actions::{Action, ModeAction, PrimaryAction, RotationAction, ScaleAction};
+use self::planner::MonitorPlanner;
 use super::{
     brightness,
-    common::{format_scale, match_supported_scale, parse_resolution, resolve_connector},
+    common::{
+        format_scale, match_supported_scale, parse_position, parse_resolution, resolve_connector,
+    },
 };
+use gnome_randr::display_config::logical_monitor::Transform;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+    x: i32,
+    y: i32,
+}
+
+impl std::str::FromStr for Position {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (x, y) = parse_position(s)
+            .ok_or_else(|| "position must be X,Y or XxY, for example 0,0 or 1920x0".to_string())?;
+        Ok(Position { x, y })
+    }
+}
+
+impl std::fmt::Display for Position {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{},{}", self.x, self.y)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum Rotation {
@@ -115,6 +139,22 @@ pub struct ActionOptions {
 
     #[structopt(
         long,
+        help = "Disable this output",
+        long_help = "Disable this output by removing it from the applied logical-monitor layout. This is a real planner-level output disable, not a fake mode id. This conflicts with mode, preferred, auto, refresh, rotation, position, scale, primary, noprimary, and brightness options."
+    )]
+    pub off: bool,
+
+    #[structopt(
+        long,
+        alias = "pos",
+        value_name = "X,Y",
+        help = "Absolute position such as 0,0 or 1920x0",
+        long_help = "Absolute top-left position for this outputs logical monitor. Use a simple coordinate pair such as 0,0 or 1920x0. --pos is accepted as an alias. Relative placement flags stay in a later backlog note."
+    )]
+    pub position: Option<Position>,
+
+    #[structopt(
+        long,
         value_name = "SCALE",
         help = "Scale such as 1, 1.25, 1.5, or 2 from query",
         long_help = "Scale factor reported by \"gnome-randr query CONNECTOR\" for this output, typically values like \"1\", \"1.25\", \"1.5\", or \"2\". You can type the displayed value directly even when Mutter's exact supported float has more precision internally; gnome-randr will choose the nearest advertised supported scale for the selected mode. Run \"gnome-randr query CONNECTOR\" to list the supported scales for that output."
@@ -164,7 +204,7 @@ pub struct CommandOptions {
     #[structopt(
         long,
         help = "Preview the requested changes without applying them",
-        long_help = "Preview the requested changes without applying them. This is useful to confirm the resolved connector, preferred/auto/refresh-selected mode, scale, rotation, primary or noprimary state, brightness, and filter changes first."
+        long_help = "Preview the requested changes without applying them. This is useful to confirm the resolved connector, off/on state, absolute position, preferred/auto/refresh-selected mode, scale, rotation, primary or noprimary state, brightness, and filter changes first."
     )]
     dry_run: bool,
 }
@@ -172,6 +212,9 @@ pub struct CommandOptions {
 #[derive(Debug)]
 pub enum Error {
     NotFound,
+    OutputDisabled {
+        connector: String,
+    },
     ModeNotFound {
         connector: String,
         mode: String,
@@ -205,6 +248,11 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::NotFound => write!(f, "fatal: unable to find output."),
+            Error::OutputDisabled { connector } => write!(
+                f,
+                "fatal: {} is currently disabled. Re-enabling outputs is not part of this command yet; run \"gnome-randr query\" to inspect the current layout.",
+                connector
+            ),
             Error::ModeNotFound { connector, mode } => write!(
                 f,
                 "fatal: mode or resolution \"{}\" is not available on {}. Run \"gnome-randr query {}\" to list valid mode ids.",
@@ -296,6 +344,26 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
             actions.noprimary,
             "--noprimary",
         ),
+        (actions.off, "--off", actions.mode.is_some(), "--mode"),
+        (actions.off, "--off", actions.preferred, "--preferred"),
+        (actions.off, "--off", actions.auto_mode, "--auto"),
+        (actions.off, "--off", actions.refresh.is_some(), "--refresh"),
+        (actions.off, "--off", actions.rotation.is_some(), "--rotate"),
+        (
+            actions.off,
+            "--off",
+            actions.position.is_some(),
+            "--position",
+        ),
+        (actions.off, "--off", actions.scale.is_some(), "--scale"),
+        (actions.off, "--off", actions.primary, "--primary"),
+        (actions.off, "--off", actions.noprimary, "--noprimary"),
+        (
+            actions.off,
+            "--off",
+            actions.brightness.is_some(),
+            "--brightness",
+        ),
     ];
 
     for (option_used, option, conflicting_used, conflicting) in conflicts {
@@ -308,6 +376,15 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+fn rotation_transform(rotation: Rotation) -> u32 {
+    match rotation {
+        Rotation::Normal => Transform::NORMAL.bits(),
+        Rotation::Left => Transform::R270.bits(),
+        Rotation::Right => Transform::R90.bits(),
+        Rotation::Inverted => Transform::R180.bits(),
+    }
 }
 
 fn compare_mode_priority(left: &Mode, right: &Mode) -> Ordering {
@@ -515,57 +592,101 @@ pub fn handle(
             .iter()
             .map(|monitor| monitor.connector.as_str()),
     )?;
-    let (logical_monitor, physical_monitor) = config.search(&connector).ok_or(Error::NotFound)?;
-    let resolved_mode = resolve_mode(physical_monitor, &connector, &opts.actions)?;
-    let resolved_scale = resolve_scale(
-        physical_monitor,
-        &connector,
-        resolved_mode,
-        opts.actions.scale,
-    )?;
-
-    let mut actions = Vec::<Box<dyn Action>>::new();
-    let primary_is_changing = opts.actions.primary;
+    let physical_monitor = config.physical_monitor(&connector).ok_or(Error::NotFound)?;
+    let logical_monitor = config.logical_monitor_for_connector(&connector);
+    let output_enabled = logical_monitor.is_some();
+    let resolved_mode = if opts.actions.off {
+        None
+    } else {
+        if !output_enabled {
+            return Err(Error::OutputDisabled {
+                connector: connector.clone(),
+            }
+            .into());
+        }
+        resolve_mode(physical_monitor, &connector, &opts.actions)?
+    };
+    let resolved_scale = if opts.actions.off {
+        None
+    } else {
+        resolve_scale(
+            physical_monitor,
+            &connector,
+            resolved_mode,
+            opts.actions.scale,
+        )?
+    };
     let brightness = opts.actions.brightness;
 
-    if let Some(rotation) = &opts.actions.rotation {
-        actions.push(Box::new(RotationAction {
-            rotation: *rotation,
-        }));
-    }
+    let has_layout_changes = opts.actions.off
+        || opts.actions.rotation.is_some()
+        || opts.actions.position.is_some()
+        || resolved_mode.is_some()
+        || opts.actions.primary
+        || opts.actions.noprimary
+        || resolved_scale.is_some();
 
-    if let Some(mode) = resolved_mode {
-        actions.push(Box::new(ModeAction { mode: &mode.id }))
-    }
-
-    if opts.actions.primary {
-        actions.push(Box::new(PrimaryAction { primary: true }));
-    }
-
-    if opts.actions.noprimary {
-        actions.push(Box::new(PrimaryAction { primary: false }));
-    }
-
-    if let Some(scale) = resolved_scale {
-        actions.push(Box::new(ScaleAction { scale }))
-    }
-
-    if actions.is_empty() && brightness.is_none() {
+    if opts.actions.off && !output_enabled && brightness.is_none() {
         println!("no changes made.");
         return Ok(());
     }
 
-    if opts.dry_run {
-        if !actions.is_empty() {
-            let mut apply_config = ApplyConfig::from(logical_monitor, physical_monitor);
+    if !has_layout_changes && brightness.is_none() {
+        println!("no changes made.");
+        return Ok(());
+    }
 
+    let mut planner = if has_layout_changes {
+        Some(MonitorPlanner::new(config)?)
+    } else {
+        None
+    };
+
+    if opts.dry_run {
+        if has_layout_changes {
             if opts.persistent {
                 println!("attempting to persist config to disk")
             }
 
-            for action in actions.iter() {
-                println!("{}", &action);
-                action.apply(&mut apply_config, physical_monitor);
+            if opts.actions.off {
+                println!("disabling output {}", connector);
+                planner.as_mut().unwrap().remove_output(&connector)?;
+            }
+
+            if let Some(rotation) = &opts.actions.rotation {
+                println!("setting rotation to {}", rotation);
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .set_transform(&connector, rotation_transform(*rotation))?;
+            }
+
+            if let Some(position) = opts.actions.position {
+                println!("setting position to {}", position);
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .set_position(&connector, position.x, position.y)?;
+            }
+
+            if let Some(mode) = resolved_mode {
+                println!("setting mode to {}", mode.id);
+                planner.as_mut().unwrap().set_mode(&connector, &mode.id)?;
+            }
+
+            if opts.actions.primary {
+                println!("setting monitor as primary");
+                planner.as_mut().unwrap().set_primary(&connector)?;
+            }
+
+            if opts.actions.noprimary {
+                println!("clearing primary status from this monitor");
+                planner.as_mut().unwrap().clear_primary(&connector)?;
+            }
+
+            if let Some(scale) = resolved_scale {
+                println!("setting scale to {}", format_scale(scale));
+                planner.as_mut().unwrap().set_scale(&connector, scale)?;
             }
         }
 
@@ -585,42 +706,53 @@ pub fn handle(
         return Ok(());
     }
 
-    if !actions.is_empty() {
-        let mut apply_config = ApplyConfig::from(logical_monitor, physical_monitor);
-
+    if has_layout_changes {
         if opts.persistent {
             println!("attempting to persist config to disk")
         }
 
-        for action in actions.iter() {
-            println!("{}", &action);
-            action.apply(&mut apply_config, physical_monitor);
+        if opts.actions.off {
+            println!("disabling output {}", connector);
+            planner.as_mut().unwrap().remove_output(&connector)?;
         }
 
-        let all_configs = config
-            .monitors
-            .iter()
-            .filter_map(|monitor| {
-                if monitor.connector == connector {
-                    return Some(apply_config.clone());
-                }
+        if let Some(rotation) = &opts.actions.rotation {
+            println!("setting rotation to {}", rotation);
+            planner
+                .as_mut()
+                .unwrap()
+                .set_transform(&connector, rotation_transform(*rotation))?;
+        }
 
-                let (logical_monitor, _) = match config.search(&monitor.connector) {
-                    Some(monitors) => monitors,
-                    None => return None,
-                };
+        if let Some(position) = opts.actions.position {
+            println!("setting position to {}", position);
+            planner
+                .as_mut()
+                .unwrap()
+                .set_position(&connector, position.x, position.y)?;
+        }
 
-                let mut apply_config = ApplyConfig::from(logical_monitor, monitor);
+        if let Some(mode) = resolved_mode {
+            println!("setting mode to {}", mode.id);
+            planner.as_mut().unwrap().set_mode(&connector, &mode.id)?;
+        }
 
-                if primary_is_changing {
-                    apply_config.primary = false;
-                }
+        if opts.actions.primary {
+            println!("setting monitor as primary");
+            planner.as_mut().unwrap().set_primary(&connector)?;
+        }
 
-                Some(apply_config)
-            })
-            .collect();
+        if opts.actions.noprimary {
+            println!("clearing primary status from this monitor");
+            planner.as_mut().unwrap().clear_primary(&connector)?;
+        }
 
-        config.apply_monitors_config(proxy, all_configs, opts.persistent)?;
+        if let Some(scale) = resolved_scale {
+            println!("setting scale to {}", format_scale(scale));
+            planner.as_mut().unwrap().set_scale(&connector, scale)?;
+        }
+
+        config.apply_monitors_config(proxy, planner.unwrap().into_configs(), opts.persistent)?;
     }
 
     if let Some(brightness) = brightness {
@@ -640,7 +772,7 @@ pub fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_mode, resolve_scale, ActionOptions, Error};
+    use super::{resolve_mode, resolve_scale, validate_actions, ActionOptions, Error, Position};
     use gnome_randr::display_config::physical_monitor::{
         KnownModeProperties, Mode, PhysicalMonitor,
     };
@@ -655,6 +787,8 @@ mod tests {
             refresh: None,
             primary: false,
             noprimary: false,
+            off: false,
+            position: None,
             scale: None,
             brightness: None,
             filter: BrightnessFilter::Linear,
@@ -874,6 +1008,24 @@ mod tests {
                 assert_eq!(supported_scales, vec![1.0, 1.7518248]);
             }
             _ => panic!("unexpected error variant"),
+        }
+    }
+
+    #[test]
+    fn validate_actions_rejects_off_with_position() {
+        let mut actions = actions();
+        actions.off = true;
+        actions.position = Some(Position { x: 1920, y: 0 });
+
+        match validate_actions(&actions).unwrap_err() {
+            Error::ConflictingOptions {
+                option,
+                conflicting,
+            } => {
+                assert_eq!(option, "--off");
+                assert_eq!(conflicting, "--position");
+            }
+            error => panic!("unexpected error variant: {:?}", error),
         }
     }
 }

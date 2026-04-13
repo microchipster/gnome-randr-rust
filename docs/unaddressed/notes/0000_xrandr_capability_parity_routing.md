@@ -14,14 +14,12 @@ Capability parity matters more than syntax parity.
 
 ## What Is Already Landed
 
-- `query` can report logical monitor state, physical monitor state, software brightness state, JSON output, raw property maps, and xrandr-style logical monitor list views.
-- `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, scale including displayed rounded scale values, rotation, primary or noprimary state, and software brightness.
+- `query` can report logical monitor state, physical monitor state, enabled state for disabled outputs, software brightness state, JSON output, raw property maps, and xrandr-style logical monitor list views.
+- `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, disable outputs with `--off`, set absolute positions with `--position` / `--pos`, scale including displayed rounded scale values, rotation, primary or noprimary state, and software brightness, and it now plans changes through one full transactional config payload internally.
 - dynamic shell completions and single-monitor defaults are already in place.
 
 ## Ordered Follow-up Notes
 
-- `0050_build_a_transactional_multi_output_monitor_planner.md`
-- `0060_add_real_output_disable_and_absolute_positioning.md`
 - `0070_add_relative_placement_and_fix_rotation_reflow.md`
 - `0080_add_same_as_clone_group_support_with_clear_mutter_limits.md`
 - `0090_add_software_gamma_controls.md`
@@ -33,14 +31,13 @@ Capability parity matters more than syntax parity.
 ## Why The Work Is Split This Way
 
 - `0020` through `0040` were the easiest parity wins and mostly extended existing query/modify flows.
-- `0050` is the architectural prerequisite for the bigger layout features.
-- `0060` through `0080` cover the most important missing topology controls from the historical issue backlog.
+- `0050` established the architectural prerequisite for the bigger layout features.
+- `0060` established the first real topology-control slice after the planner; `0070` through `0080` cover the remaining relative-placement and mirroring controls from the historical issue backlog.
 - `0090` through `0120` expand output-control parity and Wayland-native capabilities after the layout foundation is solid.
 - `0130` keeps the backlog honest about what the Mutter D-Bus backend can and cannot represent.
 
 ## Existing Backlog This Reroutes
 
-- `docs/unaddressed/issues/0013_Add_an__--off__flag.md`
 - `docs/unaddressed/issues/0020__Feature_Request___Mirroring_config.md`
 - `docs/unaddressed/issues/0021__Feature_Request___Add_capability_to_turn_off_screen_and_set.md`
 - `docs/unaddressed/issues/0027_when_try_to_rotate_left_or_right_encounter_error_D-Bus_error.md`

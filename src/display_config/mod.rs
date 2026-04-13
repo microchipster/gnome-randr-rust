@@ -146,19 +146,35 @@ impl DisplayConfig {
         }
     }
 
-    pub fn search(&self, connector: &str) -> Option<(&LogicalMonitor, &PhysicalMonitor)> {
-        let physical_monitor = self
-            .monitors
+    pub fn physical_monitor(&self, connector: &str) -> Option<&PhysicalMonitor> {
+        self.monitors
             .iter()
-            .find(|monitor| monitor.connector == *connector);
+            .find(|monitor| monitor.connector == *connector)
+    }
 
-        let logical_monitor = self.logical_monitors.iter().find(|monitor| {
+    pub fn logical_monitor_for_connector(&self, connector: &str) -> Option<&LogicalMonitor> {
+        self.logical_monitors.iter().find(|monitor| {
             monitor
                 .monitors
                 .iter()
                 .find(|pm| pm.connector == *connector)
                 .is_some()
-        });
+        })
+    }
+
+    pub fn logical_monitor_index_for_connector(&self, connector: &str) -> Option<usize> {
+        self.logical_monitors.iter().position(|monitor| {
+            monitor
+                .monitors
+                .iter()
+                .find(|pm| pm.connector == *connector)
+                .is_some()
+        })
+    }
+
+    pub fn search(&self, connector: &str) -> Option<(&LogicalMonitor, &PhysicalMonitor)> {
+        let physical_monitor = self.physical_monitor(connector);
+        let logical_monitor = self.logical_monitor_for_connector(connector);
 
         physical_monitor
             .map(|physical_monitor| {

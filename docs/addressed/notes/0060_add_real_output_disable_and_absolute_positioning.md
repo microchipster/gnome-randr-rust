@@ -39,3 +39,29 @@ Historical issue `#13` showed that faking disable through `--mode=-1` does not w
 ## Follow-ups
 
 - relative placement belongs in `0070_add_relative_placement_and_fix_rotation_reflow.md`
+
+## How This Was Addressed
+
+- added a real `modify --off` path that removes the target connector from the applied logical-monitor payload through the transactional planner instead of pretending `-1` is a mode id
+- added absolute `modify --position X,Y` with `--pos` alias, using the planner's logical-monitor position mutation path
+- extended `modify` validation so `--off` conflicts with layout, primary, and brightness flags that would be ambiguous on a disabled output
+- updated `query` text and JSON so disabled-but-still-connected outputs remain queryable by connector and now report explicit `enabled` state
+- bumped the JSON schema to version `3` to add physical-monitor `enabled` reporting while keeping disabled connector queries stable
+
+## How To Exercise And Test It
+
+- preview disabling one output:
+  - `cargo run -- modify HDMI-1 --off --dry-run`
+- actually disable one output, then inspect it directly:
+  - `cargo run -- modify HDMI-1 --off`
+  - `cargo run -- query HDMI-1`
+  - `cargo run -- query HDMI-1 --json | jq '.monitors[0].enabled'`
+- preview absolute positioning for an enabled output:
+  - `cargo run -- modify eDP-1 --position 0,0 --dry-run`
+  - `cargo run -- modify eDP-1 --pos 1920x0 --dry-run`
+- inspect enabled state and positions after a real apply:
+  - `cargo run -- query`
+  - `cargo run -- query --json | jq '.logical_monitors[] | {x, y, monitors}'`
+- confirm the old fake-mode path is no longer the intended workflow:
+  - `cargo run -- modify HDMI-1 --off --dry-run`
+  - compare with the historical issue note showing `--mode=-1` failed through D-Bus validation

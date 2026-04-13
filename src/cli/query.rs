@@ -22,7 +22,7 @@ use super::brightness;
 use super::brightness::{CurrentBrightness, CurrentBrightnessState};
 use super::common::{format_refresh, format_scale};
 
-const JSON_SCHEMA_VERSION: u32 = 2;
+const JSON_SCHEMA_VERSION: u32 = 3;
 const DISPLAY_PROPERTY_KEYS: [&str; 1] = ["renderer"];
 const MONITOR_PROPERTY_KEYS: [&str; 4] = ["display-name", "is-builtin", "width-mm", "height-mm"];
 
@@ -120,6 +120,7 @@ struct AssociatedMonitorJson {
 #[derive(Serialize)]
 struct PhysicalMonitorJson {
     connector: String,
+    enabled: bool,
     vendor: String,
     product: String,
     serial: String,
@@ -155,6 +156,11 @@ struct SoftwareBrightnessJson {
 }
 
 type SelectedLogicalMonitor<'a> = (usize, &'a LogicalMonitor);
+
+struct SelectedMonitors<'a> {
+    logical_monitors: Vec<SelectedLogicalMonitor<'a>>,
+    physical_monitors: Vec<&'a PhysicalMonitor>,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum TextView {
@@ -336,23 +342,41 @@ fn software_brightness_json(current: &CurrentBrightness) -> SoftwareBrightnessJs
 fn selected_monitors<'a>(
     opts: &CommandOptions,
     config: &'a DisplayConfig,
-) -> Result<(Vec<SelectedLogicalMonitor<'a>>, Vec<&'a PhysicalMonitor>), Error> {
+) -> Result<SelectedMonitors<'a>, Error> {
     match &opts.connector {
         Some(connector) => {
-            let (logical_monitor, physical_monitor) =
-                config.search(connector).ok_or(Error::NotFound)?;
-            let index = config
-                .logical_monitors
-                .iter()
-                .position(|candidate| ptr::eq(candidate, logical_monitor))
-                .unwrap_or(0);
-            Ok((vec![(index, logical_monitor)], vec![physical_monitor]))
+            let physical_monitor = config.physical_monitor(connector).ok_or(Error::NotFound)?;
+            let logical_monitors = config
+                .logical_monitor_for_connector(connector)
+                .map(|logical_monitor| {
+                    vec![(
+                        config
+                            .logical_monitor_index_for_connector(connector)
+                            .unwrap_or_else(|| {
+                                config
+                                    .logical_monitors
+                                    .iter()
+                                    .position(|candidate| ptr::eq(candidate, logical_monitor))
+                                    .unwrap_or(0)
+                            }),
+                        logical_monitor,
+                    )]
+                })
+                .unwrap_or_default();
+            Ok(SelectedMonitors {
+                logical_monitors,
+                physical_monitors: vec![physical_monitor],
+            })
         }
-        None => Ok((
-            config.logical_monitors.iter().enumerate().collect(),
-            config.monitors.iter().collect(),
-        )),
+        None => Ok(SelectedMonitors {
+            logical_monitors: config.logical_monitors.iter().enumerate().collect(),
+            physical_monitors: config.monitors.iter().collect(),
+        }),
     }
+}
+
+fn monitor_enabled(config: &DisplayConfig, connector: &str) -> bool {
+    config.logical_monitor_for_connector(connector).is_some()
 }
 
 fn current_mode(monitor: &PhysicalMonitor) -> Option<&Mode> {
@@ -379,7 +403,7 @@ fn current_mode_geometry(
     let mut height_mm = 0;
 
     for associated in &logical_monitor.monitors {
-        if let Some((_, monitor)) = config.search(&associated.connector) {
+        if let Some(monitor) = config.physical_monitor(&associated.connector) {
             if let Some(mode) = current_mode(monitor).or_else(|| preferred_mode(monitor)) {
                 width_px = width_px.max(mode.width);
                 height_px = height_px.max(mode.height);
@@ -593,6 +617,7 @@ fn write_verbose_modes(output: &mut String, modes: &[Mode], show_properties: boo
 
 fn write_monitors<F>(
     output: &mut String,
+    config: &DisplayConfig,
     monitors: &[&PhysicalMonitor],
     brightness_for: &F,
     verbose: bool,
@@ -606,6 +631,11 @@ where
     for monitor in monitors {
         writeln!(output, "  {}:", monitor.connector)?;
         writeln!(output, "    connector: {}", monitor.connector)?;
+        writeln!(
+            output,
+            "    enabled: {}",
+            monitor_enabled(config, &monitor.connector)
+        )?;
         writeln!(output, "    vendor: {}", monitor.vendor)?;
         writeln!(output, "    product: {}", monitor.product)?;
         writeln!(output, "    serial: {}", monitor.serial)?;
@@ -723,7 +753,7 @@ fn build_json<F>(
 where
     F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
 {
-    let (logical_monitors, physical_monitors) = selected_monitors(opts, config)?;
+    let selected = selected_monitors(opts, config)?;
 
     let json = QueryJson {
         schema_version: JSON_SCHEMA_VERSION,
@@ -734,7 +764,8 @@ where
         global_scale_required: config.known_properties.global_scale_required,
         renderer: property_string(&config.properties, "renderer"),
         properties: filtered_properties_json(&config.properties, &DISPLAY_PROPERTY_KEYS),
-        logical_monitors: logical_monitors
+        logical_monitors: selected
+            .logical_monitors
             .into_iter()
             .map(|(_, monitor)| LogicalMonitorJson {
                 x: monitor.x,
@@ -755,11 +786,13 @@ where
                 properties: filtered_properties_json(&monitor.properties, &[]),
             })
             .collect(),
-        monitors: physical_monitors
+        monitors: selected
+            .physical_monitors
             .into_iter()
             .map(|monitor| {
                 Ok(PhysicalMonitorJson {
                     connector: monitor.connector.clone(),
+                    enabled: monitor_enabled(config, &monitor.connector),
                     vendor: monitor.vendor.clone(),
                     product: monitor.product.clone(),
                     serial: monitor.serial.clone(),
@@ -811,12 +844,23 @@ where
 
     Ok(match &opts.connector {
         Some(connector) => {
-            let (logical_monitor, _) = config.search(connector).ok_or(Error::NotFound)?;
-            format!(
-                "{}software brightness: {}\n",
-                logical_monitor,
+            let physical_monitor = config.physical_monitor(connector).ok_or(Error::NotFound)?;
+            let mut output = String::new();
+            if let Some(logical_monitor) = config.logical_monitor_for_connector(connector) {
+                write!(&mut output, "{}", logical_monitor)?;
+            }
+            writeln!(&mut output, "connector: {}", physical_monitor.connector)?;
+            writeln!(
+                &mut output,
+                "enabled: {}",
+                monitor_enabled(config, connector)
+            )?;
+            writeln!(
+                &mut output,
+                "software brightness: {}",
                 format_brightness(connector)?
-            )
+            )?;
+            output
         }
         None => {
             let mut output = String::new();
@@ -825,12 +869,13 @@ where
                 output.push('\n');
             }
 
-            writeln!(&mut output, "software brightness:")?;
+            writeln!(&mut output, "outputs:")?;
             for monitor in &config.monitors {
                 writeln!(
                     &mut output,
-                    "\t{}: {}",
+                    "\t{}: enabled={}, software brightness={}",
                     monitor.connector,
+                    monitor_enabled(config, &monitor.connector),
                     format_brightness(&monitor.connector)?
                 )?;
             }
@@ -850,7 +895,7 @@ fn build_structured_text<F>(
 where
     F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
 {
-    let (logical_monitors, physical_monitors) = selected_monitors(opts, config)?;
+    let selected = selected_monitors(opts, config)?;
     let mut output = String::new();
 
     if opts.connector.is_none() || verbose {
@@ -858,11 +903,20 @@ where
         output.push('\n');
     }
 
-    write_logical_monitors(&mut output, &logical_monitors, verbose, show_properties)?;
-    output.push('\n');
+    if opts.connector.is_none() || !selected.logical_monitors.is_empty() || verbose {
+        write_logical_monitors(
+            &mut output,
+            &selected.logical_monitors,
+            verbose,
+            show_properties,
+        )?;
+        output.push('\n');
+    }
+
     write_monitors(
         &mut output,
-        &physical_monitors,
+        config,
+        &selected.physical_monitors,
         brightness_for,
         verbose,
         show_properties,
@@ -887,8 +941,8 @@ where
         TextView::Summary => build_summary_text(opts, config, brightness_for),
         TextView::Verbose => build_structured_text(opts, config, brightness_for, true, true),
         TextView::ListMonitors | TextView::ListActiveMonitors => {
-            let (logical_monitors, _) = selected_monitors(opts, config)?;
-            build_list_monitors(config, &logical_monitors)
+            let selected = selected_monitors(opts, config)?;
+            build_list_monitors(config, &selected.logical_monitors)
         }
     }
 }
@@ -902,7 +956,23 @@ pub fn handle(
     let resources = Resources::get_resources(proxy)?;
 
     let brightness_for =
-        |connector: &str| brightness::load_current_brightness(connector, &resources, proxy);
+        |connector: &str| match brightness::load_current_brightness(connector, &resources, proxy) {
+            Ok(current) => Ok(current),
+            Err(error)
+                if error
+                    .downcast_ref::<brightness::Error>()
+                    .map(|error| {
+                        matches!(
+                            error,
+                            brightness::Error::OutputDisabled | brightness::Error::CrtcNotFound
+                        )
+                    })
+                    .unwrap_or(false) =>
+            {
+                Ok(CurrentBrightness::unknown())
+            }
+            Err(error) => Err(error),
+        };
 
     match view {
         QueryView::Json => build_json(opts, config, &brightness_for),
@@ -967,26 +1037,48 @@ mod tests {
 
         DisplayConfig {
             serial: 7,
-            monitors: vec![PhysicalMonitor {
-                connector: "eDP-1".to_string(),
-                vendor: "BOE".to_string(),
-                product: "0x07c9".to_string(),
-                serial: "0x00000000".to_string(),
-                modes: vec![Mode {
-                    id: "1920x1080@60".to_string(),
-                    width: 1920,
-                    height: 1080,
-                    refresh_rate: 60.0,
-                    preferred_scale: 1.0,
-                    supported_scales: vec![1.0, 2.0],
-                    known_properties: KnownModeProperties {
-                        is_current: true,
-                        is_preferred: true,
-                    },
-                    properties: mode_properties,
-                }],
-                properties: monitor_properties,
-            }],
+            monitors: vec![
+                PhysicalMonitor {
+                    connector: "eDP-1".to_string(),
+                    vendor: "BOE".to_string(),
+                    product: "0x07c9".to_string(),
+                    serial: "0x00000000".to_string(),
+                    modes: vec![Mode {
+                        id: "1920x1080@60".to_string(),
+                        width: 1920,
+                        height: 1080,
+                        refresh_rate: 60.0,
+                        preferred_scale: 1.0,
+                        supported_scales: vec![1.0, 2.0],
+                        known_properties: KnownModeProperties {
+                            is_current: true,
+                            is_preferred: true,
+                        },
+                        properties: mode_properties,
+                    }],
+                    properties: monitor_properties,
+                },
+                PhysicalMonitor {
+                    connector: "HDMI-1".to_string(),
+                    vendor: "Dell".to_string(),
+                    product: "U2720Q".to_string(),
+                    serial: "0x11111111".to_string(),
+                    modes: vec![Mode {
+                        id: "2560x1440@60".to_string(),
+                        width: 2560,
+                        height: 1440,
+                        refresh_rate: 60.0,
+                        preferred_scale: 1.0,
+                        supported_scales: vec![1.0],
+                        known_properties: KnownModeProperties {
+                            is_current: false,
+                            is_preferred: true,
+                        },
+                        properties: Default::default(),
+                    }],
+                    properties: Default::default(),
+                },
+            ],
             logical_monitors: vec![LogicalMonitor {
                 x: 0,
                 y: 0,
@@ -1037,7 +1129,7 @@ mod tests {
 
         let value: Value = serde_json::from_str(&output).unwrap();
 
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 3);
         assert_eq!(value["renderer"], "native");
         assert_eq!(value["properties"]["compositor-capabilities"][0], "gamma");
         assert_eq!(value["logical_monitors"][0]["rotation"], "normal");
@@ -1046,6 +1138,7 @@ mod tests {
             false
         );
         assert_eq!(value["monitors"][0]["connector"], "eDP-1");
+        assert_eq!(value["monitors"][0]["enabled"], true);
         assert_eq!(value["monitors"][0]["display_name"], "Built-in display");
         assert_eq!(
             value["monitors"][0]["properties"]["is-underscanning"],
@@ -1067,6 +1160,8 @@ mod tests {
             value["monitors"][0]["software_brightness"]["filter"],
             "filmic"
         );
+        assert_eq!(value["monitors"][1]["connector"], "HDMI-1");
+        assert_eq!(value["monitors"][1]["enabled"], false);
     }
 
     #[test]
@@ -1101,6 +1196,27 @@ mod tests {
     }
 
     #[test]
+    fn json_output_keeps_disabled_connector_visible() {
+        let output = build_json(
+            &CommandOptions {
+                connector: Some("HDMI-1".to_string()),
+                json: true,
+                ..opts()
+            },
+            &sample_config(),
+            &|_connector| Ok(CurrentBrightness::unknown()),
+        )
+        .unwrap();
+
+        let value: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["logical_monitors"].as_array().unwrap().len(), 0);
+        assert_eq!(value["monitors"].as_array().unwrap().len(), 1);
+        assert_eq!(value["monitors"][0]["connector"], "HDMI-1");
+        assert_eq!(value["monitors"][0]["enabled"], false);
+    }
+
+    #[test]
     fn properties_text_includes_raw_property_sections() {
         let output = build_text(
             &CommandOptions {
@@ -1118,6 +1234,8 @@ mod tests {
         assert!(output.contains("supported-color-modes: [0,1]"));
         assert!(output.contains("mode_properties[1920x1080@60]:"));
         assert!(output.contains("color-space: \"srgb\""));
+        assert!(output.contains("HDMI-1:"));
+        assert!(output.contains("enabled: false"));
     }
 
     #[test]
@@ -1140,6 +1258,49 @@ mod tests {
         assert!(output.contains("software_brightness: 1.25 (gamma)"));
         assert!(output.contains("refresh_rate: 60"));
         assert!(output.contains("is_current: true"));
+    }
+
+    #[test]
+    fn disabled_connector_text_query_stays_queryable() {
+        let output = build_text(
+            &CommandOptions {
+                connector: Some("HDMI-1".to_string()),
+                ..opts()
+            },
+            &sample_config(),
+            &|_connector| Ok(CurrentBrightness::unknown()),
+            TextView::Default,
+        )
+        .unwrap();
+
+        assert!(!output.contains("logical monitors:"));
+        assert!(output.contains("connector: HDMI-1"));
+        assert!(output.contains("enabled: false"));
+        assert!(output.contains("software_brightness: unknown"));
+    }
+
+    #[test]
+    fn summary_output_reports_enabled_state() {
+        let output = build_text(
+            &CommandOptions {
+                summary: true,
+                ..opts()
+            },
+            &sample_config(),
+            &|connector| {
+                if connector == "eDP-1" {
+                    Ok(CurrentBrightness::identity())
+                } else {
+                    Ok(CurrentBrightness::unknown())
+                }
+            },
+            TextView::Summary,
+        )
+        .unwrap();
+
+        assert!(output.contains("outputs:"));
+        assert!(output.contains("eDP-1: enabled=true, software brightness=1 (linear)"));
+        assert!(output.contains("HDMI-1: enabled=false, software brightness=unknown"));
     }
 
     #[test]
