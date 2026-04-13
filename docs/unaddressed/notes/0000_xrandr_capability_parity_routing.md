@@ -14,13 +14,12 @@ Capability parity matters more than syntax parity.
 
 ## What Is Already Landed
 
-- `query` can report logical monitor state, physical monitor state, software brightness state, and JSON output.
+- `query` can report logical monitor state, physical monitor state, software brightness state, JSON output, raw property maps, and xrandr-style logical monitor list views.
 - `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, scale including displayed rounded scale values, rotation, primary or noprimary state, and software brightness.
 - dynamic shell completions and single-monitor defaults are already in place.
 
 ## Ordered Follow-up Notes
 
-- `0040_add_richer_query_views_and_property_inspection.md`
 - `0050_build_a_transactional_multi_output_monitor_planner.md`
 - `0060_add_real_output_disable_and_absolute_positioning.md`
 - `0070_add_relative_placement_and_fix_rotation_reflow.md`
@@ -33,7 +32,7 @@ Capability parity matters more than syntax parity.
 
 ## Why The Work Is Split This Way
 
-- `0020` through `0040` are the easiest parity wins and mostly extend existing query/modify flows.
+- `0020` through `0040` were the easiest parity wins and mostly extended existing query/modify flows.
 - `0050` is the architectural prerequisite for the bigger layout features.
 - `0060` through `0080` cover the most important missing topology controls from the historical issue backlog.
 - `0090` through `0120` expand output-control parity and Wayland-native capabilities after the layout foundation is solid.

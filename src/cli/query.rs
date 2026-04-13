@@ -1,39 +1,85 @@
-use std::fmt::Write;
+use std::{
+    collections::BTreeMap,
+    fmt::{self, Write},
+    ptr,
+};
 
-use gnome_randr::{display_config::resources::Resources, DisplayConfig};
+use dbus::arg::{ArgType, PropMap, RefArg};
+use gnome_randr::{
+    display_config::{
+        logical_monitor::{LogicalMonitor, Transform},
+        physical_monitor::{Mode, PhysicalMonitor},
+        resources::Resources,
+        LayoutMode,
+    },
+    DisplayConfig,
+};
 use serde::Serialize;
+use serde_json::Value;
 use structopt::StructOpt;
 
 use super::brightness;
 use super::brightness::{CurrentBrightness, CurrentBrightnessState};
+use super::common::{format_refresh, format_scale};
 
-const JSON_SCHEMA_VERSION: u32 = 1;
+const JSON_SCHEMA_VERSION: u32 = 2;
+const DISPLAY_PROPERTY_KEYS: [&str; 1] = ["renderer"];
+const MONITOR_PROPERTY_KEYS: [&str; 4] = ["display-name", "is-builtin", "width-mm", "height-mm"];
+
+type PropertyJson = BTreeMap<String, Value>;
 
 #[derive(StructOpt)]
 pub struct CommandOptions {
     #[structopt(
         value_name = "CONNECTOR",
         help = "Connector such as eDP-1 or HDMI-1",
-        long_help = "Connector name reported by \"gnome-randr query\", such as \"eDP-1\" or \"HDMI-1\". Omit it to list every connected output, including the valid modes, scales, and current software brightness state for each one."
+        long_help = "Connector name reported by \"gnome-randr query\", such as \"eDP-1\" or \"HDMI-1\". Omit it to inspect every connected output and logical monitor."
     )]
     pub connector: Option<String>,
 
     #[structopt(
         short,
         long,
-        conflicts_with = "json",
-        help = "Show one-line summaries instead of full details",
-        long_help = "Show only the condensed view. With no connector this prints one summary block per output plus current software brightness state. With a connector it prints only that logical monitor summary and brightness state."
+        help = "Show one-line summaries instead of the default sections",
+        long_help = "Show only the condensed text view. With no connector this prints one logical-monitor summary block per active monitor plus current software brightness state. With a connector it prints only that logical monitor summary and brightness state."
     )]
     pub summary: bool,
 
     #[structopt(
         long,
         help = "Print structured JSON instead of text",
-        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, physical monitors, modes, and software brightness status for scripts.",
-        conflicts_with = "summary"
+        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, physical monitors, modes, software brightness, and raw D-Bus property maps for scripts."
     )]
     pub json: bool,
+
+    #[structopt(
+        long = "properties",
+        alias = "prop",
+        help = "Show raw Mutter property maps in text output",
+        long_help = "Include raw Mutter property maps in the text UI. `--prop` is accepted as a short alias. This surfaces values such as underscanning or color-mode-related state using the same property names exposed in JSON output."
+    )]
+    pub properties: bool,
+
+    #[structopt(
+        long,
+        help = "Show a more detailed inspection view",
+        long_help = "Show a more detailed text inspection view with explicit field names that match the JSON schema, plus raw property maps where available."
+    )]
+    pub verbose: bool,
+
+    #[structopt(
+        long = "listmonitors",
+        help = "List logical monitors in an xrandr-style view",
+        long_help = "List logical monitors in a concise xrandr-style view showing geometry, primary status, and associated connectors."
+    )]
+    pub list_monitors: bool,
+
+    #[structopt(
+        long = "listactivemonitors",
+        help = "List active logical monitors only",
+        long_help = "List active logical monitors only. With the current Mutter DisplayConfig API this usually matches --listmonitors because the query surface is already active-monitor oriented."
+    )]
+    pub list_active_monitors: bool,
 }
 
 #[derive(Serialize)]
@@ -45,6 +91,8 @@ struct QueryJson {
     supports_changing_layout_mode: bool,
     global_scale_required: bool,
     renderer: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    properties: PropertyJson,
     logical_monitors: Vec<LogicalMonitorJson>,
     monitors: Vec<PhysicalMonitorJson>,
 }
@@ -57,6 +105,8 @@ struct LogicalMonitorJson {
     rotation: String,
     primary: bool,
     monitors: Vec<AssociatedMonitorJson>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    properties: PropertyJson,
 }
 
 #[derive(Serialize)]
@@ -79,6 +129,8 @@ struct PhysicalMonitorJson {
     height_mm: Option<i64>,
     modes: Vec<ModeJson>,
     software_brightness: SoftwareBrightnessJson,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    properties: PropertyJson,
 }
 
 #[derive(Serialize)]
@@ -91,6 +143,8 @@ struct ModeJson {
     supported_scales: Vec<f64>,
     is_current: bool,
     is_preferred: bool,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    properties: PropertyJson,
 }
 
 #[derive(Serialize)]
@@ -100,47 +154,170 @@ struct SoftwareBrightnessJson {
     filter: Option<String>,
 }
 
+type SelectedLogicalMonitor<'a> = (usize, &'a LogicalMonitor);
+
+#[derive(Clone, Copy, Debug)]
+enum TextView {
+    Default,
+    Summary,
+    Verbose,
+    ListMonitors,
+    ListActiveMonitors,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum QueryView {
+    Json,
+    Text(TextView),
+}
+
 #[derive(Debug)]
 pub enum Error {
     NotFound,
+    ConflictingOptions {
+        option: &'static str,
+        conflicting: &'static str,
+    },
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match &self {
-                Error::NotFound => "fatal: unable to find output.",
-            }
-        )
+        match self {
+            Error::NotFound => write!(f, "fatal: unable to find output."),
+            Error::ConflictingOptions {
+                option,
+                conflicting,
+            } => write!(f, "fatal: {} cannot be used with {}.", option, conflicting),
+        }
     }
 }
 
 impl std::error::Error for Error {}
 
-fn property_string(properties: &dbus::arg::PropMap, key: &str) -> Option<String> {
+fn validate_options(opts: &CommandOptions) -> Result<QueryView, Error> {
+    let views = [
+        (
+            opts.summary,
+            "--summary",
+            QueryView::Text(TextView::Summary),
+        ),
+        (opts.json, "--json", QueryView::Json),
+        (
+            opts.verbose,
+            "--verbose",
+            QueryView::Text(TextView::Verbose),
+        ),
+        (
+            opts.list_monitors,
+            "--listmonitors",
+            QueryView::Text(TextView::ListMonitors),
+        ),
+        (
+            opts.list_active_monitors,
+            "--listactivemonitors",
+            QueryView::Text(TextView::ListActiveMonitors),
+        ),
+    ];
+
+    let mut active = views.iter().filter(|(enabled, _, _)| *enabled);
+    if let Some((_, option, _)) = active.next() {
+        if let Some((_, conflicting, _)) = active.next() {
+            return Err(Error::ConflictingOptions {
+                option,
+                conflicting,
+            });
+        }
+    }
+
+    if opts.properties
+        && (opts.summary || opts.json || opts.list_monitors || opts.list_active_monitors)
+    {
+        let conflicting = if opts.summary {
+            "--summary"
+        } else if opts.json {
+            "--json"
+        } else if opts.list_monitors {
+            "--listmonitors"
+        } else {
+            "--listactivemonitors"
+        };
+
+        return Err(Error::ConflictingOptions {
+            option: "--properties",
+            conflicting,
+        });
+    }
+
+    Ok(views
+        .iter()
+        .find(|(enabled, _, _)| *enabled)
+        .map(|(_, _, view)| *view)
+        .unwrap_or(QueryView::Text(TextView::Default)))
+}
+
+fn property_string(properties: &PropMap, key: &str) -> Option<String> {
     properties
         .get(key)
         .and_then(|value| value.0.as_str())
         .map(str::to_owned)
 }
 
-fn property_bool(properties: &dbus::arg::PropMap, key: &str) -> Option<bool> {
-    match properties.get(key).and_then(|value| value.0.as_u64()) {
-        Some(1) => Some(true),
-        Some(0) => Some(false),
-        _ => None,
+fn property_bool(properties: &PropMap, key: &str) -> Option<bool> {
+    match properties
+        .get(key)
+        .and_then(|value| match value.0.arg_type() {
+            ArgType::Boolean => value.0.as_u64().map(|flag| flag != 0),
+            _ => value.0.as_u64().map(|flag| flag != 0),
+        }) {
+        Some(value) => Some(value),
+        None => None,
     }
 }
 
-fn property_i64(properties: &dbus::arg::PropMap, key: &str) -> Option<i64> {
+fn property_i64(properties: &PropMap, key: &str) -> Option<i64> {
     properties.get(key).and_then(|value| {
         value
             .0
             .as_i64()
             .or_else(|| value.0.as_u64().map(|value| value as i64))
     })
+}
+
+fn property_json_value(value: &dyn RefArg) -> Value {
+    match value.arg_type() {
+        ArgType::Boolean => Value::Bool(value.as_u64().unwrap_or(0) != 0),
+        ArgType::Byte | ArgType::Int16 | ArgType::Int32 | ArgType::Int64 | ArgType::UnixFd => {
+            Value::from(value.as_i64().unwrap_or_default())
+        }
+        ArgType::UInt16 | ArgType::UInt32 | ArgType::UInt64 => {
+            Value::from(value.as_u64().unwrap_or_default())
+        }
+        ArgType::Double => serde_json::Number::from_f64(value.as_f64().unwrap_or_default())
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        ArgType::String | ArgType::ObjectPath | ArgType::Signature => {
+            Value::String(value.as_str().unwrap_or_default().to_string())
+        }
+        ArgType::Array | ArgType::Struct | ArgType::DictEntry => Value::Array(
+            value
+                .as_iter()
+                .map(|iter| iter.map(property_json_value).collect())
+                .unwrap_or_default(),
+        ),
+        ArgType::Variant => value
+            .as_iter()
+            .and_then(|mut iter| iter.next().map(property_json_value))
+            .unwrap_or(Value::Null),
+        ArgType::Invalid => Value::Null,
+    }
+}
+
+fn filtered_properties_json(properties: &PropMap, excluded: &[&str]) -> PropertyJson {
+    properties
+        .iter()
+        .filter(|(key, _)| !excluded.iter().any(|candidate| key == candidate))
+        .map(|(key, value)| (key.clone(), property_json_value(value.0.as_ref())))
+        .collect()
 }
 
 fn software_brightness_json(current: &CurrentBrightness) -> SoftwareBrightnessJson {
@@ -156,25 +333,397 @@ fn software_brightness_json(current: &CurrentBrightness) -> SoftwareBrightnessJs
     }
 }
 
+fn selected_monitors<'a>(
+    opts: &CommandOptions,
+    config: &'a DisplayConfig,
+) -> Result<(Vec<SelectedLogicalMonitor<'a>>, Vec<&'a PhysicalMonitor>), Error> {
+    match &opts.connector {
+        Some(connector) => {
+            let (logical_monitor, physical_monitor) =
+                config.search(connector).ok_or(Error::NotFound)?;
+            let index = config
+                .logical_monitors
+                .iter()
+                .position(|candidate| ptr::eq(candidate, logical_monitor))
+                .unwrap_or(0);
+            Ok((vec![(index, logical_monitor)], vec![physical_monitor]))
+        }
+        None => Ok((
+            config.logical_monitors.iter().enumerate().collect(),
+            config.monitors.iter().collect(),
+        )),
+    }
+}
+
+fn current_mode(monitor: &PhysicalMonitor) -> Option<&Mode> {
+    monitor
+        .modes
+        .iter()
+        .find(|mode| mode.known_properties.is_current)
+}
+
+fn preferred_mode(monitor: &PhysicalMonitor) -> Option<&Mode> {
+    monitor
+        .modes
+        .iter()
+        .find(|mode| mode.known_properties.is_preferred)
+}
+
+fn current_mode_geometry(
+    logical_monitor: &LogicalMonitor,
+    config: &DisplayConfig,
+) -> (i32, i32, i64, i64) {
+    let mut width_px = 0;
+    let mut height_px = 0;
+    let mut width_mm = 0;
+    let mut height_mm = 0;
+
+    for associated in &logical_monitor.monitors {
+        if let Some((_, monitor)) = config.search(&associated.connector) {
+            if let Some(mode) = current_mode(monitor).or_else(|| preferred_mode(monitor)) {
+                width_px = width_px.max(mode.width);
+                height_px = height_px.max(mode.height);
+            }
+
+            width_mm = width_mm.max(property_i64(&monitor.properties, "width-mm").unwrap_or(0));
+            height_mm = height_mm.max(property_i64(&monitor.properties, "height-mm").unwrap_or(0));
+        }
+    }
+
+    let scale = match config.known_properties.layout_mode {
+        LayoutMode::Logical if logical_monitor.scale > 0.0 => logical_monitor.scale,
+        _ => 1.0,
+    };
+
+    let mut width = ((width_px as f64) / scale).round() as i32;
+    let mut height = ((height_px as f64) / scale).round() as i32;
+    let rotated = logical_monitor.transform.bits() & Transform::R90.bits() != 0;
+    if rotated {
+        std::mem::swap(&mut width, &mut height);
+        std::mem::swap(&mut width_mm, &mut height_mm);
+    }
+
+    (width, height, width_mm, height_mm)
+}
+
+fn format_property_value(value: &Value) -> String {
+    serde_json::to_string(value).expect("serializing JSON value")
+}
+
+fn write_properties(output: &mut String, indent: usize, properties: &PropertyJson) -> fmt::Result {
+    if properties.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(output, "{:indent$}properties:", "", indent = indent)?;
+    for (key, value) in properties {
+        writeln!(
+            output,
+            "{:indent$}{}: {}",
+            "",
+            key,
+            format_property_value(value),
+            indent = indent + 2
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_display_section(
+    output: &mut String,
+    config: &DisplayConfig,
+    show_properties: bool,
+) -> fmt::Result {
+    writeln!(output, "display:")?;
+    writeln!(output, "  serial: {}", config.serial)?;
+    writeln!(
+        output,
+        "  layout_mode: {}",
+        config.known_properties.layout_mode
+    )?;
+    writeln!(
+        output,
+        "  supports_mirroring: {}",
+        config.known_properties.supports_mirroring
+    )?;
+    writeln!(
+        output,
+        "  supports_changing_layout_mode: {}",
+        config.known_properties.supports_changing_layout_mode
+    )?;
+    writeln!(
+        output,
+        "  global_scale_required: {}",
+        config.known_properties.global_scale_required
+    )?;
+
+    if let Some(renderer) = property_string(&config.properties, "renderer") {
+        writeln!(output, "  renderer: {}", renderer)?;
+    }
+
+    if show_properties {
+        write_properties(
+            output,
+            2,
+            &filtered_properties_json(&config.properties, &DISPLAY_PROPERTY_KEYS),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn logical_monitor_summary(logical_monitor: &LogicalMonitor) -> String {
+    format!(
+        "x={} y={} scale={} rotation={} primary={} connectors={}",
+        logical_monitor.x,
+        logical_monitor.y,
+        format_scale(logical_monitor.scale),
+        logical_monitor.transform,
+        if logical_monitor.primary { "yes" } else { "no" },
+        logical_monitor
+            .monitors
+            .iter()
+            .map(|monitor| monitor.connector.clone())
+            .collect::<Vec<String>>()
+            .join(",")
+    )
+}
+
+fn write_logical_monitors(
+    output: &mut String,
+    logical_monitors: &[SelectedLogicalMonitor<'_>],
+    verbose: bool,
+    show_properties: bool,
+) -> fmt::Result {
+    writeln!(output, "logical monitors:")?;
+
+    for (index, logical_monitor) in logical_monitors {
+        if verbose {
+            writeln!(output, "  {}:", index)?;
+            writeln!(output, "    x: {}", logical_monitor.x)?;
+            writeln!(output, "    y: {}", logical_monitor.y)?;
+            writeln!(output, "    scale: {}", format_scale(logical_monitor.scale))?;
+            writeln!(output, "    rotation: {}", logical_monitor.transform)?;
+            writeln!(output, "    primary: {}", logical_monitor.primary)?;
+            writeln!(output, "    monitors:")?;
+            for monitor in &logical_monitor.monitors {
+                writeln!(output, "      - connector: {}", monitor.connector)?;
+                writeln!(output, "        vendor: {}", monitor.vendor)?;
+                writeln!(output, "        product: {}", monitor.product)?;
+                writeln!(output, "        serial: {}", monitor.serial)?;
+            }
+            if show_properties {
+                write_properties(
+                    output,
+                    4,
+                    &filtered_properties_json(&logical_monitor.properties, &[]),
+                )?;
+            }
+        } else {
+            writeln!(
+                output,
+                "  {}: {}",
+                index,
+                logical_monitor_summary(logical_monitor)
+            )?;
+            if show_properties {
+                write_properties(
+                    output,
+                    4,
+                    &filtered_properties_json(&logical_monitor.properties, &[]),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_mode_table(output: &mut String, modes: &[Mode]) -> fmt::Result {
+    for mode in modes {
+        writeln!(output, "      {}", mode)?;
+    }
+
+    Ok(())
+}
+
+fn write_verbose_modes(output: &mut String, modes: &[Mode], show_properties: bool) -> fmt::Result {
+    writeln!(output, "    modes:")?;
+    for mode in modes {
+        writeln!(output, "      - id: {}", mode.id)?;
+        writeln!(output, "        width: {}", mode.width)?;
+        writeln!(output, "        height: {}", mode.height)?;
+        writeln!(
+            output,
+            "        refresh_rate: {}",
+            format_refresh(mode.refresh_rate)
+        )?;
+        writeln!(
+            output,
+            "        preferred_scale: {}",
+            format_scale(mode.preferred_scale)
+        )?;
+        writeln!(
+            output,
+            "        supported_scales: [{}]",
+            mode.supported_scales
+                .iter()
+                .map(|scale| format_scale(*scale))
+                .collect::<Vec<String>>()
+                .join(", ")
+        )?;
+        writeln!(
+            output,
+            "        is_current: {}",
+            mode.known_properties.is_current
+        )?;
+        writeln!(
+            output,
+            "        is_preferred: {}",
+            mode.known_properties.is_preferred
+        )?;
+        if show_properties {
+            write_properties(output, 8, &filtered_properties_json(&mode.properties, &[]))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_monitors<F>(
+    output: &mut String,
+    monitors: &[&PhysicalMonitor],
+    brightness_for: &F,
+    verbose: bool,
+    show_properties: bool,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+{
+    writeln!(output, "monitors:")?;
+
+    for monitor in monitors {
+        writeln!(output, "  {}:", monitor.connector)?;
+        writeln!(output, "    connector: {}", monitor.connector)?;
+        writeln!(output, "    vendor: {}", monitor.vendor)?;
+        writeln!(output, "    product: {}", monitor.product)?;
+        writeln!(output, "    serial: {}", monitor.serial)?;
+        if let Some(display_name) = property_string(&monitor.properties, "display-name") {
+            writeln!(output, "    display_name: {}", display_name)?;
+        }
+        writeln!(
+            output,
+            "    is_builtin: {}",
+            property_bool(&monitor.properties, "is-builtin")
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
+        writeln!(
+            output,
+            "    width_mm: {}",
+            property_i64(&monitor.properties, "width-mm")
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
+        writeln!(
+            output,
+            "    height_mm: {}",
+            property_i64(&monitor.properties, "height-mm")
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
+        if let Some(mode) = current_mode(monitor) {
+            writeln!(output, "    current_mode: {}", mode.id)?;
+        }
+        if let Some(mode) = preferred_mode(monitor) {
+            writeln!(output, "    preferred_mode: {}", mode.id)?;
+        }
+        writeln!(
+            output,
+            "    software_brightness: {}",
+            brightness_for(&monitor.connector)?
+        )?;
+
+        if verbose {
+            write_verbose_modes(output, &monitor.modes, show_properties)?;
+        } else {
+            writeln!(output, "    modes:")?;
+            write_mode_table(output, &monitor.modes)?;
+            if show_properties {
+                for mode in &monitor.modes {
+                    let properties = filtered_properties_json(&mode.properties, &[]);
+                    if properties.is_empty() {
+                        continue;
+                    }
+
+                    writeln!(output, "    mode_properties[{}]:", mode.id)?;
+                    write_properties(output, 6, &properties)?;
+                }
+            }
+        }
+
+        if show_properties {
+            write_properties(
+                output,
+                4,
+                &filtered_properties_json(&monitor.properties, &MONITOR_PROPERTY_KEYS),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn build_list_monitors(
+    config: &DisplayConfig,
+    logical_monitors: &[SelectedLogicalMonitor<'_>],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut output = String::new();
+    writeln!(&mut output, "Monitors: {}", logical_monitors.len())?;
+
+    for (index, logical_monitor) in logical_monitors {
+        let name = logical_monitor
+            .monitors
+            .iter()
+            .map(|monitor| monitor.connector.clone())
+            .collect::<Vec<String>>()
+            .join("+");
+        let connectors = logical_monitor
+            .monitors
+            .iter()
+            .map(|monitor| monitor.connector.clone())
+            .collect::<Vec<String>>()
+            .join(" ");
+        let (width, height, width_mm, height_mm) = current_mode_geometry(logical_monitor, config);
+        writeln!(
+            &mut output,
+            " {}: +{}{} {}/{}x{}/{}+{}+{}  {}",
+            index,
+            if logical_monitor.primary { "*" } else { "" },
+            name,
+            width,
+            width_mm,
+            height,
+            height_mm,
+            logical_monitor.x,
+            logical_monitor.y,
+            connectors
+        )?;
+    }
+
+    Ok(output)
+}
+
 fn build_json<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
-    brightness_for: F,
+    brightness_for: &F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
     F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
 {
-    let (logical_monitors, physical_monitors): (Vec<_>, Vec<_>) = match &opts.connector {
-        Some(connector) => {
-            let (logical_monitor, physical_monitor) =
-                config.search(connector).ok_or(Error::NotFound)?;
-            (vec![logical_monitor], vec![physical_monitor])
-        }
-        None => (
-            config.logical_monitors.iter().collect(),
-            config.monitors.iter().collect(),
-        ),
-    };
+    let (logical_monitors, physical_monitors) = selected_monitors(opts, config)?;
 
     let json = QueryJson {
         schema_version: JSON_SCHEMA_VERSION,
@@ -184,9 +733,10 @@ where
         supports_changing_layout_mode: config.known_properties.supports_changing_layout_mode,
         global_scale_required: config.known_properties.global_scale_required,
         renderer: property_string(&config.properties, "renderer"),
+        properties: filtered_properties_json(&config.properties, &DISPLAY_PROPERTY_KEYS),
         logical_monitors: logical_monitors
             .into_iter()
-            .map(|monitor| LogicalMonitorJson {
+            .map(|(_, monitor)| LogicalMonitorJson {
                 x: monitor.x,
                 y: monitor.y,
                 scale: monitor.scale,
@@ -202,6 +752,7 @@ where
                         serial: monitor.serial.clone(),
                     })
                     .collect(),
+                properties: filtered_properties_json(&monitor.properties, &[]),
             })
             .collect(),
         monitors: physical_monitors
@@ -228,11 +779,16 @@ where
                             supported_scales: mode.supported_scales.clone(),
                             is_current: mode.known_properties.is_current,
                             is_preferred: mode.known_properties.is_preferred,
+                            properties: filtered_properties_json(&mode.properties, &[]),
                         })
                         .collect(),
                     software_brightness: software_brightness_json(&brightness_for(
                         &monitor.connector,
                     )?),
+                    properties: filtered_properties_json(
+                        &monitor.properties,
+                        &MONITOR_PROPERTY_KEYS,
+                    ),
                 })
             })
             .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?,
@@ -241,10 +797,10 @@ where
     Ok(serde_json::to_string_pretty(&json)?)
 }
 
-fn build_text<F>(
+fn build_summary_text<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
-    brightness_for: F,
+    brightness_for: &F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
     F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
@@ -255,28 +811,16 @@ where
 
     Ok(match &opts.connector {
         Some(connector) => {
-            let (logical_monitor, physical_monitor) =
-                config.search(connector).ok_or(Error::NotFound)?;
-            let brightness = format_brightness(connector)?;
-
-            if opts.summary {
-                format!("{}software brightness: {}\n", logical_monitor, brightness)
-            } else {
-                format!(
-                    "{}\n{}software brightness: {}\n",
-                    logical_monitor, physical_monitor, brightness
-                )
-            }
+            let (logical_monitor, _) = config.search(connector).ok_or(Error::NotFound)?;
+            format!(
+                "{}software brightness: {}\n",
+                logical_monitor,
+                format_brightness(connector)?
+            )
         }
         None => {
-            let mut output = if opts.summary {
-                let mut s = String::new();
-                config.format(&mut s, true)?;
-                s
-            } else {
-                format!("{}", config)
-            };
-
+            let mut output = String::new();
+            config.format(&mut output, true)?;
             if !output.ends_with('\n') {
                 output.push('\n');
             }
@@ -296,26 +840,79 @@ where
     })
 }
 
+fn build_structured_text<F>(
+    opts: &CommandOptions,
+    config: &DisplayConfig,
+    brightness_for: &F,
+    verbose: bool,
+    show_properties: bool,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+{
+    let (logical_monitors, physical_monitors) = selected_monitors(opts, config)?;
+    let mut output = String::new();
+
+    if opts.connector.is_none() || verbose {
+        write_display_section(&mut output, config, show_properties)?;
+        output.push('\n');
+    }
+
+    write_logical_monitors(&mut output, &logical_monitors, verbose, show_properties)?;
+    output.push('\n');
+    write_monitors(
+        &mut output,
+        &physical_monitors,
+        brightness_for,
+        verbose,
+        show_properties,
+    )?;
+
+    Ok(output)
+}
+
+fn build_text<F>(
+    opts: &CommandOptions,
+    config: &DisplayConfig,
+    brightness_for: &F,
+    view: TextView,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: Fn(&str) -> Result<CurrentBrightness, Box<dyn std::error::Error>>,
+{
+    match view {
+        TextView::Default => {
+            build_structured_text(opts, config, brightness_for, false, opts.properties)
+        }
+        TextView::Summary => build_summary_text(opts, config, brightness_for),
+        TextView::Verbose => build_structured_text(opts, config, brightness_for, true, true),
+        TextView::ListMonitors | TextView::ListActiveMonitors => {
+            let (logical_monitors, _) = selected_monitors(opts, config)?;
+            build_list_monitors(config, &logical_monitors)
+        }
+    }
+}
+
 pub fn handle(
     opts: &CommandOptions,
     config: &DisplayConfig,
     proxy: &dbus::blocking::Proxy<&dbus::blocking::Connection>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let view = validate_options(opts)?;
     let resources = Resources::get_resources(proxy)?;
 
     let brightness_for =
         |connector: &str| brightness::load_current_brightness(connector, &resources, proxy);
 
-    if opts.json {
-        build_json(opts, config, brightness_for)
-    } else {
-        build_text(opts, config, brightness_for)
+    match view {
+        QueryView::Json => build_json(opts, config, &brightness_for),
+        QueryView::Text(view) => build_text(opts, config, &brightness_for, view),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_json, CommandOptions};
+    use super::{build_json, build_text, validate_options, CommandOptions, QueryView, TextView};
     use crate::cli::brightness::{CurrentBrightness, CurrentBrightnessState};
     use gnome_randr::display_config::{
         logical_monitor::{LogicalMonitor, Monitor, Transform},
@@ -330,17 +927,42 @@ mod tests {
             "renderer".to_string(),
             dbus::arg::Variant(Box::new("native".to_string())),
         );
+        properties.insert(
+            "compositor-capabilities".to_string(),
+            dbus::arg::Variant(Box::new(vec!["gamma".to_string(), "clone".to_string()])),
+        );
 
         let mut monitor_properties = dbus::arg::PropMap::new();
         monitor_properties.insert(
             "display-name".to_string(),
             dbus::arg::Variant(Box::new("Built-in display".to_string())),
         );
-        monitor_properties.insert("is-builtin".to_string(), dbus::arg::Variant(Box::new(1u32)));
+        monitor_properties.insert("is-builtin".to_string(), dbus::arg::Variant(Box::new(true)));
+        monitor_properties.insert(
+            "is-underscanning".to_string(),
+            dbus::arg::Variant(Box::new(false)),
+        );
+        monitor_properties.insert(
+            "supported-color-modes".to_string(),
+            dbus::arg::Variant(Box::new(vec![0u32, 1u32])),
+        );
+        monitor_properties.insert("color-mode".to_string(), dbus::arg::Variant(Box::new(1u32)));
         monitor_properties.insert("width-mm".to_string(), dbus::arg::Variant(Box::new(300i32)));
         monitor_properties.insert(
             "height-mm".to_string(),
             dbus::arg::Variant(Box::new(190i32)),
+        );
+
+        let mut mode_properties = dbus::arg::PropMap::new();
+        mode_properties.insert(
+            "color-space".to_string(),
+            dbus::arg::Variant(Box::new("srgb".to_string())),
+        );
+
+        let mut logical_properties = dbus::arg::PropMap::new();
+        logical_properties.insert(
+            "presentation".to_string(),
+            dbus::arg::Variant(Box::new(false)),
         );
 
         DisplayConfig {
@@ -361,7 +983,7 @@ mod tests {
                         is_current: true,
                         is_preferred: true,
                     },
-                    properties: dbus::arg::PropMap::new(),
+                    properties: mode_properties,
                 }],
                 properties: monitor_properties,
             }],
@@ -377,7 +999,7 @@ mod tests {
                     product: "0x07c9".to_string(),
                     serial: "0x00000000".to_string(),
                 }],
-                properties: dbus::arg::PropMap::new(),
+                properties: logical_properties,
             }],
             known_properties: KnownProperties {
                 supports_mirroring: true,
@@ -389,26 +1011,50 @@ mod tests {
         }
     }
 
+    fn opts() -> CommandOptions {
+        CommandOptions {
+            connector: None,
+            summary: false,
+            json: false,
+            properties: false,
+            verbose: false,
+            list_monitors: false,
+            list_active_monitors: false,
+        }
+    }
+
     #[test]
     fn json_output_uses_documented_schema() {
         let output = build_json(
             &CommandOptions {
-                connector: None,
-                summary: false,
                 json: true,
+                ..opts()
             },
             &sample_config(),
-            |_connector| Ok(CurrentBrightness::managed(1.5, "filmic".parse().unwrap())),
+            &|_connector| Ok(CurrentBrightness::managed(1.5, "filmic".parse().unwrap())),
         )
         .unwrap();
 
         let value: Value = serde_json::from_str(&output).unwrap();
 
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["renderer"], "native");
+        assert_eq!(value["properties"]["compositor-capabilities"][0], "gamma");
         assert_eq!(value["logical_monitors"][0]["rotation"], "normal");
+        assert_eq!(
+            value["logical_monitors"][0]["properties"]["presentation"],
+            false
+        );
         assert_eq!(value["monitors"][0]["connector"], "eDP-1");
         assert_eq!(value["monitors"][0]["display_name"], "Built-in display");
+        assert_eq!(
+            value["monitors"][0]["properties"]["is-underscanning"],
+            false
+        );
+        assert_eq!(
+            value["monitors"][0]["modes"][0]["properties"]["color-space"],
+            "srgb"
+        );
         assert_eq!(
             value["monitors"][0]["software_brightness"]["state"],
             "managed"
@@ -428,11 +1074,11 @@ mod tests {
         let output = build_json(
             &CommandOptions {
                 connector: Some("eDP-1".to_string()),
-                summary: false,
                 json: true,
+                ..opts()
             },
             &sample_config(),
-            |_connector| {
+            &|_connector| {
                 Ok(CurrentBrightness {
                     state: CurrentBrightnessState::Unknown,
                     brightness: None,
@@ -452,5 +1098,101 @@ mod tests {
         );
         assert!(value["monitors"][0]["software_brightness"]["brightness"].is_null());
         assert!(value["monitors"][0]["software_brightness"]["filter"].is_null());
+    }
+
+    #[test]
+    fn properties_text_includes_raw_property_sections() {
+        let output = build_text(
+            &CommandOptions {
+                properties: true,
+                ..opts()
+            },
+            &sample_config(),
+            &|_connector| Ok(CurrentBrightness::identity()),
+            TextView::Default,
+        )
+        .unwrap();
+
+        assert!(output.contains("properties:"));
+        assert!(output.contains("is-underscanning: false"));
+        assert!(output.contains("supported-color-modes: [0,1]"));
+        assert!(output.contains("mode_properties[1920x1080@60]:"));
+        assert!(output.contains("color-space: \"srgb\""));
+    }
+
+    #[test]
+    fn verbose_text_uses_json_style_field_names() {
+        let output = build_text(
+            &CommandOptions {
+                verbose: true,
+                connector: Some("eDP-1".to_string()),
+                ..opts()
+            },
+            &sample_config(),
+            &|_connector| Ok(CurrentBrightness::managed(1.25, "gamma".parse().unwrap())),
+            TextView::Verbose,
+        )
+        .unwrap();
+
+        assert!(output.contains("display:"));
+        assert!(output.contains("logical monitors:"));
+        assert!(output.contains("display_name: Built-in display"));
+        assert!(output.contains("software_brightness: 1.25 (gamma)"));
+        assert!(output.contains("refresh_rate: 60"));
+        assert!(output.contains("is_current: true"));
+    }
+
+    #[test]
+    fn listmonitors_view_matches_xrandr_style_shape() {
+        let output = build_text(
+            &CommandOptions {
+                list_monitors: true,
+                ..opts()
+            },
+            &sample_config(),
+            &|_connector| Ok(CurrentBrightness::identity()),
+            TextView::ListMonitors,
+        )
+        .unwrap();
+
+        assert!(output.starts_with("Monitors: 1\n"));
+        assert!(output.contains(" 0: +*eDP-1 1920/300x1080/190+0+0  eDP-1"));
+    }
+
+    #[test]
+    fn validate_options_rejects_conflicting_views() {
+        let error = validate_options(&CommandOptions {
+            summary: true,
+            json: true,
+            ..opts()
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "fatal: --summary cannot be used with --json."
+        );
+
+        let error = validate_options(&CommandOptions {
+            properties: true,
+            list_monitors: true,
+            ..opts()
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "fatal: --properties cannot be used with --listmonitors."
+        );
+    }
+
+    #[test]
+    fn validate_options_accepts_verbose_with_properties() {
+        let view = validate_options(&CommandOptions {
+            verbose: true,
+            properties: true,
+            ..opts()
+        })
+        .unwrap();
+
+        assert!(matches!(view, QueryView::Text(TextView::Verbose)));
     }
 }

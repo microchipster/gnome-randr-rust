@@ -14,7 +14,9 @@ pub mod query;
 
 #[derive(StructOpt)]
 enum Command {
-    #[structopt(about = "List outputs, or inspect one output by connector such as eDP-1.")]
+    #[structopt(
+        about = "List outputs, logical monitors, and properties, or inspect one output by connector."
+    )]
     Query(query::CommandOptions),
     #[structopt(
         about = "Change one output using query values, including preferred/refresh mode selection."
@@ -27,7 +29,7 @@ enum Command {
 #[derive(StructOpt)]
 #[structopt(
     about = "A program to query information about and manipulate displays on Gnome with Wayland.",
-    long_about = "A program to query information about and manipulate displays on Gnome with Wayland.\n\nDefault command is `query`. Run \"gnome-randr query\" first to list connector names such as \"eDP-1\" or \"HDMI-1\", plus each output's valid mode ids, scale factors, and current software brightness state."
+    long_about = "A program to query information about and manipulate displays on Gnome with Wayland.\n\nDefault command is `query`. Run \"gnome-randr query\" first to list connector names such as \"eDP-1\" or \"HDMI-1\", each output's valid mode ids and scale factors, current software brightness state, and richer text views such as `--listmonitors`, `--verbose`, and `--properties`."
 )]
 struct CLI {
     #[structopt(subcommand)]
@@ -52,6 +54,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         connector: None,
         summary: false,
         json: false,
+        properties: false,
+        verbose: false,
+        list_monitors: false,
+        list_active_monitors: false,
     }));
 
     match cmd {
