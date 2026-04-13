@@ -21,9 +21,9 @@ Shell completions can be generated with `gnome-randr completions bash`, `gnome-r
 
 `gnome-randr` is aiming for `xrandr` capability parity with a more modern Wayland-first CLI, not argument-for-argument syntax parity.
 
-- Implemented: query text/summary/JSON output, `query --verbose`, `query --properties`, `query --listmonitors`, `query --listactivemonitors`, enabled-state reporting for disabled outputs, mode selection by id or resolution with `--refresh`, `--preferred`, `--auto`, `--primary` / `--noprimary`, real `modify --off`, absolute `modify --position` / `--pos`, relative placement via `--left-of` / `--right-of` / `--above` / `--below`, `modify --same-as` mirroring with local clone preflight, rotation-aware geometry reflow, scale including the rounded values shown in `query`, rotation, software brightness with filters, software gamma via `modify --gamma`, dynamic shell completions, current software brightness and gamma reporting in `query`, and an internal transactional full-config planner behind `modify`
+- Implemented: query text/summary/JSON output, `query --verbose`, `query --properties`, `query --listmonitors`, `query --listactivemonitors`, enabled-state reporting for disabled outputs, typed reflection/color-mode/underscanning visibility in query output, mode selection by id or resolution with `--refresh`, `--preferred`, `--auto`, `--primary` / `--noprimary`, real `modify --off`, absolute `modify --position` / `--pos`, relative placement via `--left-of` / `--right-of` / `--above` / `--below`, `modify --same-as` mirroring with local clone preflight, rotation-aware geometry reflow, `modify --reflect`, `modify --color-mode`, scale including the rounded values shown in `query`, rotation, software brightness with filters, software gamma via `modify --gamma`, dynamic shell completions, current software brightness and gamma reporting in `query`, and an internal transactional full-config planner behind `modify`
 - Planned next: saved profiles
-- Limited by Mutter: some same-as / partial mirroring layouts and layout-mode changes still depend on what the current `org.gnome.Mutter.DisplayConfig` backend accepts at apply time
+- Limited by Mutter: some same-as / partial mirroring layouts, layout-mode changes, and writable monitor properties beyond the documented color-mode surface still depend on what the current `org.gnome.Mutter.DisplayConfig` backend accepts at apply time
 
 ## Mirroring
 
@@ -31,6 +31,13 @@ Shell completions can be generated with `gnome-randr completions bash`, `gnome-r
 - Before apply, gnome-randr rejects obviously impossible mirror requests using Mutter's resource model: clone capability, shared possible CRTCs, and a compatible mode on the target output.
 - Even when local preflight passes, Mutter may still reject some partial mirroring layouts. In those cases gnome-randr reports that GNOME's DisplayConfig validation rejected the clone request rather than pretending the local planner proved it would work.
 - Unsupported with the current backend: custom modelines, arbitrary transform matrices and panning, X11 provider/CRTC controls, and framebuffer/DPI compatibility flags
+
+## Reflection And Monitor Properties
+
+- `gnome-randr modify CONNECTOR --reflect normal|x|y|xy` maps xrandr-style reflection names onto Mutter's flipped transform model instead of exposing raw transform integers.
+- `gnome-randr modify CONNECTOR --color-mode default|bt2100` exposes the small typed monitor-property surface that Mutter and `gdctl` already support today.
+- `gnome-randr query` and `gnome-randr query --json` now report typed `rotation`, `reflection`, `color_mode`, `supported_color_modes`, and `is_underscanning` fields in addition to the raw property map.
+- Writable underscanning is intentionally not exposed here because the current Mutter-supported write surface could not be justified beyond query visibility; `--properties` and JSON still show it when the compositor exposes it.
 
 ## Software Color
 
@@ -54,11 +61,11 @@ See `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md` for the ac
 
 `gnome-randr query --json` prints a documented machine-readable schema for scripts. `gnome-randr query CONNECTOR --json` uses the same schema, filtered down to the requested connector, even when that connector is currently disabled. `--summary`, `--properties`, `--listmonitors`, and `--listactivemonitors` are text-only views and cannot be combined with `--json`.
 
-Schema version `4` currently contains:
+Schema version `5` currently contains:
 
 - top-level metadata: `schema_version`, `serial`, `layout_mode`, `supports_mirroring`, `supports_changing_layout_mode`, `global_scale_required`, optional `renderer`, and optional raw `properties`
-- `logical_monitors`: objects with `x`, `y`, `scale`, `rotation`, `primary`, associated `monitors`, and optional raw `properties`
-- `monitors`: physical outputs with identity fields, `enabled`, optional `display_name` / `is_builtin` / `width_mm` / `height_mm`, supported `modes`, `software_brightness`, `software_gamma`, and optional raw `properties`
+- `logical_monitors`: objects with `x`, `y`, `scale`, typed `rotation`, typed `reflection`, `primary`, associated `monitors`, and optional raw `properties`
+- `monitors`: physical outputs with identity fields, `enabled`, optional `display_name` / `is_builtin` / `width_mm` / `height_mm`, typed `color_mode`, typed `supported_color_modes`, optional `is_underscanning`, supported `modes`, `software_brightness`, `software_gamma`, and optional raw `properties`
 - each mode includes `id`, `width`, `height`, `refresh_rate`, `preferred_scale`, `supported_scales`, `is_current`, `is_preferred`, and optional raw `properties`
 - `software_brightness.state` is one of `managed`, `identity`, or `unknown`
 - when `software_brightness.state` is `managed` or `identity`, `brightness` and `filter` are populated; otherwise they are `null`
@@ -69,7 +76,7 @@ Example:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "serial": 42,
   "layout_mode": "physical",
   "supports_mirroring": true,
@@ -85,6 +92,7 @@ Example:
       "y": 0,
       "scale": 1.0,
       "rotation": "normal",
+      "reflection": "normal",
       "primary": true,
       "monitors": [
         {
@@ -110,6 +118,9 @@ Example:
       "is_builtin": true,
       "width_mm": 300,
       "height_mm": 190,
+      "color_mode": "bt2100",
+      "supported_color_modes": ["default", "bt2100"],
+      "is_underscanning": false,
       "modes": [
         {
           "id": "1920x1080@59.999",
@@ -163,6 +174,10 @@ gnome-randr query eDP-1 --json | jq '.monitors[0].software_brightness'
 
 # get software gamma for one connector
 gnome-randr query eDP-1 --json | jq '.monitors[0].software_gamma'
+
+# inspect typed reflection and color-mode state
+gnome-randr query --json | jq '.logical_monitors[] | {rotation, reflection, monitors}'
+gnome-randr query --json | jq '.monitors[] | {connector, color_mode, supported_color_modes, is_underscanning}'
 
 # inspect raw monitor properties when present
 gnome-randr query --json | jq '.monitors[] | {connector, properties}'

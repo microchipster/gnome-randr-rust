@@ -2,7 +2,7 @@ mod planner;
 
 use std::cmp::Ordering;
 
-use gnome_randr::display_config::proxied_methods::{BrightnessFilter, GammaAdjustment};
+use gnome_randr::display_config::proxied_methods::{BrightnessFilter, ColorMode, GammaAdjustment};
 use gnome_randr::{
     display_config::{
         physical_monitor::Mode,
@@ -21,6 +21,9 @@ use super::{
     },
 };
 use gnome_randr::display_config::logical_monitor::Transform;
+
+const REFLECT_VALUES: &[&str] = &["normal", "x", "y", "xy"];
+const COLOR_MODE_VALUES: &[&str] = &["default", "bt2100"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
@@ -48,6 +51,43 @@ impl std::fmt::Display for Position {
 struct RelativePlacementRequest<'a> {
     placement: RelativePlacement,
     reference: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reflection {
+    Normal,
+    X,
+    Y,
+    XY,
+}
+
+impl std::str::FromStr for Reflection {
+    type Err = std::fmt::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "normal" => Ok(Reflection::Normal),
+            "x" => Ok(Reflection::X),
+            "y" => Ok(Reflection::Y),
+            "xy" => Ok(Reflection::XY),
+            _ => Err(std::fmt::Error),
+        }
+    }
+}
+
+impl std::fmt::Display for Reflection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Reflection::Normal => "normal",
+                Reflection::X => "x",
+                Reflection::Y => "y",
+                Reflection::XY => "xy",
+            }
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -104,6 +144,15 @@ pub struct ActionOptions {
         long_help = "Rotate the output. Valid values are \"normal\", \"left\", \"right\", and \"inverted\". \"right\" is clockwise and \"left\" is counter-clockwise."
     )]
     pub rotation: Option<Rotation>,
+
+    #[structopt(
+        long,
+        value_name = "REFLECTION",
+        possible_values = REFLECT_VALUES,
+        help = "Reflection: normal, x, y, or xy",
+        long_help = "Reflect the output using xrandr-style names: normal, x, y, or xy. This maps onto Mutter's flipped transform model and composes with rotation through the existing transform bits."
+    )]
+    pub reflect: Option<Reflection>,
 
     #[structopt(
         short,
@@ -166,6 +215,16 @@ pub struct ActionOptions {
         long_help = "Absolute top-left position for this outputs logical monitor. Use a simple coordinate pair such as 0,0 or 1920x0. --pos is accepted as an alias. This conflicts with the relative placement flags."
     )]
     pub position: Option<Position>,
+
+    #[structopt(
+        long = "color-mode",
+        value_name = "MODE",
+        possible_values = COLOR_MODE_VALUES,
+        parse(try_from_str = parse_color_mode),
+        help = "Monitor color mode: default or bt2100",
+        long_help = "Set a known Mutter color mode on this output. Current Mutter/GNOME builds expose color modes such as default and bt2100 when the monitor supports them. This is an explicit Mutter-native property control, not generic xrandr-style property plumbing."
+    )]
+    pub color_mode: Option<ColorMode>,
 
     #[structopt(
         long = "same-as",
@@ -297,6 +356,14 @@ pub enum Error {
         reference: String,
         mode: String,
     },
+    ColorModeUnsupported {
+        connector: String,
+    },
+    ColorModeUnavailable {
+        connector: String,
+        requested: ColorMode,
+        supported: Vec<ColorMode>,
+    },
     MutterRejectedClone {
         connector: String,
         reference: String,
@@ -374,6 +441,26 @@ impl std::fmt::Display for Error {
                 f,
                 "fatal: {} cannot mirror {} because it has no compatible mode for {}. Run \"gnome-randr query {}\" and \"gnome-randr query {}\" to compare the available modes.",
                 connector, reference, mode, connector, reference
+            ),
+            Error::ColorModeUnsupported { connector } => write!(
+                f,
+                "fatal: {} does not expose writable color modes through Mutter. Run \"gnome-randr query {} --properties\" to inspect the available monitor properties.",
+                connector, connector
+            ),
+            Error::ColorModeUnavailable {
+                connector,
+                requested,
+                supported,
+            } => write!(
+                f,
+                "fatal: {} cannot use color mode {}. Supported color modes are {}.",
+                connector,
+                requested,
+                supported
+                    .iter()
+                    .map(|mode| mode.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", ")
             ),
             Error::MutterRejectedClone {
                 connector,
@@ -480,6 +567,7 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
         (actions.off, "--off", actions.auto_mode, "--auto"),
         (actions.off, "--off", actions.refresh.is_some(), "--refresh"),
         (actions.off, "--off", actions.rotation.is_some(), "--rotate"),
+        (actions.off, "--off", actions.reflect.is_some(), "--reflect"),
         (
             actions.off,
             "--off",
@@ -487,6 +575,12 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
             "--position",
         ),
         (actions.off, "--off", actions.scale.is_some(), "--scale"),
+        (
+            actions.off,
+            "--off",
+            actions.color_mode.is_some(),
+            "--color-mode",
+        ),
         (actions.off, "--off", actions.primary, "--primary"),
         (actions.off, "--off", actions.noprimary, "--noprimary"),
         (
@@ -599,6 +693,12 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
         (
             actions.same_as.is_some(),
             "--same-as",
+            actions.reflect.is_some(),
+            "--reflect",
+        ),
+        (
+            actions.same_as.is_some(),
+            "--same-as",
             actions.position.is_some(),
             "--position",
         ),
@@ -632,6 +732,12 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
             actions.scale.is_some(),
             "--scale",
         ),
+        (
+            actions.same_as.is_some(),
+            "--same-as",
+            actions.color_mode.is_some(),
+            "--color-mode",
+        ),
     ];
 
     for (option_used, option, conflicting_used, conflicting) in conflicts {
@@ -646,6 +752,10 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
     Ok(())
 }
 
+fn parse_color_mode(value: &str) -> Result<ColorMode, String> {
+    value.parse()
+}
+
 fn rotation_transform(rotation: Rotation) -> u32 {
     match rotation {
         Rotation::Normal => Transform::NORMAL.bits(),
@@ -653,6 +763,75 @@ fn rotation_transform(rotation: Rotation) -> u32 {
         Rotation::Right => Transform::R90.bits(),
         Rotation::Inverted => Transform::R180.bits(),
     }
+}
+
+fn rotation_bits(transform: u32) -> u32 {
+    transform & Transform::R270.bits()
+}
+
+fn rotate_180(transform: u32) -> u32 {
+    (rotation_bits(transform) + 2) & Transform::R270.bits()
+}
+
+fn reflection_from_transform(transform: u32) -> Reflection {
+    if transform & Transform::FLIPPED.bits() == 0 {
+        Reflection::Normal
+    } else if matches!(rotation_bits(transform), bits if bits == Transform::R180.bits() || bits == Transform::R270.bits())
+    {
+        Reflection::X
+    } else {
+        Reflection::Y
+    }
+}
+
+fn transform_from_rotation_and_reflection(rotation: Rotation, reflection: Reflection) -> u32 {
+    let rotation = rotation_transform(rotation);
+
+    match reflection {
+        Reflection::Normal => rotation,
+        Reflection::Y => rotation | Transform::FLIPPED.bits(),
+        Reflection::X => rotate_180(rotation) | Transform::FLIPPED.bits(),
+        Reflection::XY => rotate_180(rotation),
+    }
+}
+
+fn effective_transform(
+    current_transform: u32,
+    rotation: Option<Rotation>,
+    reflection: Option<Reflection>,
+) -> Option<u32> {
+    if rotation.is_none() && reflection.is_none() {
+        return None;
+    }
+
+    let current_rotation = match rotation_bits(current_transform) {
+        bits if bits == Transform::R90.bits() => Rotation::Right,
+        bits if bits == Transform::R180.bits() => Rotation::Inverted,
+        bits if bits == Transform::R270.bits() => Rotation::Left,
+        _ => Rotation::Normal,
+    };
+
+    Some(transform_from_rotation_and_reflection(
+        rotation.unwrap_or(current_rotation),
+        reflection.unwrap_or_else(|| reflection_from_transform(current_transform)),
+    ))
+}
+
+fn transform_swaps_axes(transform: u32) -> bool {
+    matches!(rotation_bits(transform), bits if bits == Transform::R90.bits() || bits == Transform::R270.bits())
+}
+
+fn supported_color_modes(physical_monitor: &PhysicalMonitor) -> Vec<ColorMode> {
+    physical_monitor
+        .properties
+        .get("supported-color-modes")
+        .and_then(|value| value.0.as_iter())
+        .map(|iter| {
+            iter.filter_map(|value| value.as_u64())
+                .filter_map(|value| ColorMode::from_raw(value as u32))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn relative_placement_request(actions: &ActionOptions) -> Option<RelativePlacementRequest<'_>> {
@@ -745,6 +924,34 @@ fn resolve_clone_request<'a>(
     })?;
 
     Ok(CloneRequest { reference, mode })
+}
+
+fn resolve_color_mode_request(
+    connector: &str,
+    physical_monitor: &PhysicalMonitor,
+    requested: Option<ColorMode>,
+) -> Result<Option<ColorMode>, Error> {
+    let requested = match requested {
+        Some(requested) => requested,
+        None => return Ok(None),
+    };
+
+    let supported = supported_color_modes(physical_monitor);
+    if supported.is_empty() {
+        return Err(Error::ColorModeUnsupported {
+            connector: connector.to_string(),
+        });
+    }
+
+    if !supported.contains(&requested) {
+        return Err(Error::ColorModeUnavailable {
+            connector: connector.to_string(),
+            requested,
+            supported,
+        });
+    }
+
+    Ok(Some(requested))
 }
 
 fn compare_mode_priority(left: &Mode, right: &Mode) -> Ordering {
@@ -955,6 +1162,9 @@ pub fn handle(
     let physical_monitor = config.physical_monitor(&connector).ok_or(Error::NotFound)?;
     let logical_monitor = config.logical_monitor_for_connector(&connector);
     let output_enabled = logical_monitor.is_some();
+    let current_transform = logical_monitor
+        .map(|logical_monitor| logical_monitor.transform.bits())
+        .unwrap_or(Transform::NORMAL.bits());
     let brightness = opts.actions.brightness;
     let gamma_adjustment = opts.actions.gamma;
     let same_as = opts.actions.same_as.as_deref();
@@ -994,20 +1204,41 @@ pub fn handle(
             opts.actions.scale,
         )?
     };
+    let resolved_color_mode = if opts.actions.off || clone_request.is_some() {
+        None
+    } else {
+        resolve_color_mode_request(&connector, physical_monitor, opts.actions.color_mode)?
+    };
     let relative_placement = relative_placement_request(&opts.actions);
-    let geometry_changes =
-        opts.actions.rotation.is_some() || resolved_mode.is_some() || resolved_scale.is_some();
+    let target_transform = effective_transform(
+        current_transform,
+        opts.actions.rotation,
+        opts.actions.reflect,
+    );
+    let geometry_changes = target_transform
+        .map(|transform| transform_swaps_axes(transform) != transform_swaps_axes(current_transform))
+        .unwrap_or(false)
+        || resolved_mode.is_some()
+        || resolved_scale.is_some();
     let explicit_placement = opts.actions.position.is_some() || relative_placement.is_some();
 
     let has_layout_changes = opts.actions.off
         || clone_request.is_some()
-        || opts.actions.rotation.is_some()
+        || target_transform.is_some()
         || opts.actions.position.is_some()
         || relative_placement.is_some()
         || resolved_mode.is_some()
         || opts.actions.primary
         || opts.actions.noprimary
-        || resolved_scale.is_some();
+        || resolved_scale.is_some()
+        || resolved_color_mode.is_some();
+
+    if has_layout_changes && !opts.actions.off && clone_request.is_none() && !output_enabled {
+        return Err(Error::OutputDisabled {
+            connector: connector.clone(),
+        }
+        .into());
+    }
 
     if opts.actions.off && !output_enabled && brightness.is_none() && gamma_adjustment.is_none() {
         println!("no changes made.");
@@ -1056,10 +1287,17 @@ pub fn handle(
 
             if let Some(rotation) = &opts.actions.rotation {
                 println!("setting rotation to {}", rotation);
+            }
+
+            if let Some(reflection) = &opts.actions.reflect {
+                println!("setting reflection to {}", reflection);
+            }
+
+            if let Some(transform) = target_transform {
                 planner
                     .as_mut()
                     .unwrap()
-                    .set_transform(&connector, rotation_transform(*rotation))?;
+                    .set_transform(&connector, transform)?;
             }
 
             if let Some(mode) = resolved_mode {
@@ -1070,6 +1308,14 @@ pub fn handle(
             if let Some(scale) = resolved_scale {
                 println!("setting scale to {}", format_scale(scale));
                 planner.as_mut().unwrap().set_scale(&connector, scale)?;
+            }
+
+            if let Some(color_mode) = resolved_color_mode {
+                println!("setting color mode to {}", color_mode);
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .set_color_mode(&connector, color_mode)?;
             }
 
             if let Some(position) = opts.actions.position {
@@ -1159,10 +1405,17 @@ pub fn handle(
 
         if let Some(rotation) = &opts.actions.rotation {
             println!("setting rotation to {}", rotation);
+        }
+
+        if let Some(reflection) = &opts.actions.reflect {
+            println!("setting reflection to {}", reflection);
+        }
+
+        if let Some(transform) = target_transform {
             planner
                 .as_mut()
                 .unwrap()
-                .set_transform(&connector, rotation_transform(*rotation))?;
+                .set_transform(&connector, transform)?;
         }
 
         if let Some(mode) = resolved_mode {
@@ -1173,6 +1426,14 @@ pub fn handle(
         if let Some(scale) = resolved_scale {
             println!("setting scale to {}", format_scale(scale));
             planner.as_mut().unwrap().set_scale(&connector, scale)?;
+        }
+
+        if let Some(color_mode) = resolved_color_mode {
+            println!("setting color mode to {}", color_mode);
+            planner
+                .as_mut()
+                .unwrap()
+                .set_color_mode(&connector, color_mode)?;
         }
 
         if let Some(position) = opts.actions.position {
@@ -1262,6 +1523,7 @@ mod tests {
     fn actions() -> ActionOptions {
         ActionOptions {
             rotation: None,
+            reflect: None,
             mode: None,
             preferred: false,
             auto_mode: false,
@@ -1276,6 +1538,7 @@ mod tests {
             above: None,
             below: None,
             scale: None,
+            color_mode: None,
             brightness: None,
             gamma: None,
             filter: BrightnessFilter::Linear,

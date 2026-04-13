@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    convert::TryFrom,
     fmt::{self, Write},
     ptr,
 };
@@ -9,6 +10,7 @@ use gnome_randr::{
     display_config::{
         logical_monitor::{LogicalMonitor, Transform},
         physical_monitor::{Mode, PhysicalMonitor},
+        proxied_methods::ColorMode,
         resources::Resources,
         LayoutMode,
     },
@@ -22,7 +24,7 @@ use super::brightness;
 use super::brightness::{CurrentColor, CurrentColorState};
 use super::common::{format_refresh, format_scale};
 
-const JSON_SCHEMA_VERSION: u32 = 4;
+const JSON_SCHEMA_VERSION: u32 = 5;
 const DISPLAY_PROPERTY_KEYS: [&str; 1] = ["renderer"];
 const MONITOR_PROPERTY_KEYS: [&str; 4] = ["display-name", "is-builtin", "width-mm", "height-mm"];
 
@@ -41,14 +43,14 @@ pub struct CommandOptions {
         short,
         long,
         help = "Show one-line summaries instead of the default sections",
-        long_help = "Show only the condensed text view. With no connector this prints one logical-monitor summary block per active monitor plus current software brightness and gamma state. With a connector it prints only that logical monitor summary and managed software color state."
+        long_help = "Show only the condensed text view. With no connector this prints one logical-monitor summary block per active monitor plus per-output enabled state, typed reflection/color-mode state, underscanning visibility, and current software brightness/gamma state. With a connector it prints that logical monitor summary plus the connector's typed monitor state and managed software color state."
     )]
     pub summary: bool,
 
     #[structopt(
         long,
         help = "Print structured JSON instead of text",
-        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, physical monitors, modes, software brightness, software gamma, and raw D-Bus property maps for scripts."
+        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, typed rotation/reflection fields, physical monitors, typed color-mode and underscanning visibility, software brightness, software gamma, and raw D-Bus property maps for scripts."
     )]
     pub json: bool,
 
@@ -103,6 +105,7 @@ struct LogicalMonitorJson {
     y: i32,
     scale: f64,
     rotation: String,
+    reflection: String,
     primary: bool,
     monitors: Vec<AssociatedMonitorJson>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -128,6 +131,10 @@ struct PhysicalMonitorJson {
     is_builtin: Option<bool>,
     width_mm: Option<i64>,
     height_mm: Option<i64>,
+    color_mode: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    supported_color_modes: Vec<String>,
+    is_underscanning: Option<bool>,
     modes: Vec<ModeJson>,
     software_brightness: SoftwareBrightnessJson,
     software_gamma: SoftwareGammaJson,
@@ -296,6 +303,70 @@ fn property_i64(properties: &PropMap, key: &str) -> Option<i64> {
             .as_i64()
             .or_else(|| value.0.as_u64().map(|value| value as i64))
     })
+}
+
+fn property_u32(properties: &PropMap, key: &str) -> Option<u32> {
+    properties
+        .get(key)
+        .and_then(|value| value.0.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn color_mode(properties: &PropMap) -> Option<ColorMode> {
+    property_u32(properties, "color-mode").and_then(ColorMode::from_raw)
+}
+
+fn supported_color_modes(properties: &PropMap) -> Vec<ColorMode> {
+    properties
+        .get("supported-color-modes")
+        .and_then(|value| value.0.as_iter())
+        .map(|iter| {
+            iter.filter_map(|entry| {
+                entry
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .and_then(ColorMode::from_raw)
+            })
+            .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn rotation_from_transform(transform: Transform) -> &'static str {
+    match transform.bits() & Transform::R270.bits() {
+        bits if bits == Transform::R90.bits() => "right",
+        bits if bits == Transform::R180.bits() => "inverted",
+        bits if bits == Transform::R270.bits() => "left",
+        _ => "normal",
+    }
+}
+
+fn reflection_from_transform(transform: Transform) -> &'static str {
+    if transform.bits() & Transform::FLIPPED.bits() == 0 {
+        return "normal";
+    }
+
+    match transform.bits() & Transform::R270.bits() {
+        bits if bits == Transform::R180.bits() || bits == Transform::R270.bits() => "x",
+        _ => "y",
+    }
+}
+
+fn format_color_mode(color_mode: Option<ColorMode>) -> String {
+    color_mode
+        .map(|color_mode| color_mode.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn format_supported_color_modes(modes: &[ColorMode]) -> String {
+    format!(
+        "[{}]",
+        modes
+            .iter()
+            .map(|mode| mode.to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
+    )
 }
 
 fn property_json_value(value: &dyn RefArg) -> Value {
@@ -522,11 +593,12 @@ fn write_display_section(
 
 fn logical_monitor_summary(logical_monitor: &LogicalMonitor) -> String {
     format!(
-        "x={} y={} scale={} rotation={} primary={} connectors={}",
+        "x={} y={} scale={} rotation={} reflection={} primary={} connectors={}",
         logical_monitor.x,
         logical_monitor.y,
         format_scale(logical_monitor.scale),
-        logical_monitor.transform,
+        rotation_from_transform(logical_monitor.transform),
+        reflection_from_transform(logical_monitor.transform),
         if logical_monitor.primary { "yes" } else { "no" },
         logical_monitor
             .monitors
@@ -551,7 +623,16 @@ fn write_logical_monitors(
             writeln!(output, "    x: {}", logical_monitor.x)?;
             writeln!(output, "    y: {}", logical_monitor.y)?;
             writeln!(output, "    scale: {}", format_scale(logical_monitor.scale))?;
-            writeln!(output, "    rotation: {}", logical_monitor.transform)?;
+            writeln!(
+                output,
+                "    rotation: {}",
+                rotation_from_transform(logical_monitor.transform)
+            )?;
+            writeln!(
+                output,
+                "    reflection: {}",
+                reflection_from_transform(logical_monitor.transform)
+            )?;
             writeln!(output, "    primary: {}", logical_monitor.primary)?;
             writeln!(output, "    monitors:")?;
             for monitor in &logical_monitor.monitors {
@@ -686,6 +767,23 @@ where
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "null".to_string())
         )?;
+        writeln!(
+            output,
+            "    color_mode: {}",
+            format_color_mode(color_mode(&monitor.properties))
+        )?;
+        writeln!(
+            output,
+            "    supported_color_modes: {}",
+            format_supported_color_modes(&supported_color_modes(&monitor.properties))
+        )?;
+        writeln!(
+            output,
+            "    is_underscanning: {}",
+            property_bool(&monitor.properties, "is-underscanning")
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
         if let Some(mode) = current_mode(monitor) {
             writeln!(output, "    current_mode: {}", mode.id)?;
         }
@@ -799,7 +897,8 @@ where
                 x: monitor.x,
                 y: monitor.y,
                 scale: monitor.scale,
-                rotation: monitor.transform.to_string(),
+                rotation: rotation_from_transform(monitor.transform).to_string(),
+                reflection: reflection_from_transform(monitor.transform).to_string(),
                 primary: monitor.primary,
                 monitors: monitor
                     .monitors
@@ -828,6 +927,12 @@ where
                     is_builtin: property_bool(&monitor.properties, "is-builtin"),
                     width_mm: property_i64(&monitor.properties, "width-mm"),
                     height_mm: property_i64(&monitor.properties, "height-mm"),
+                    color_mode: color_mode(&monitor.properties).map(|mode| mode.to_string()),
+                    supported_color_modes: supported_color_modes(&monitor.properties)
+                        .into_iter()
+                        .map(|mode| mode.to_string())
+                        .collect(),
+                    is_underscanning: property_bool(&monitor.properties, "is-underscanning"),
                     modes: monitor
                         .modes
                         .iter()
@@ -871,44 +976,45 @@ where
     let format_gamma = |connector: &str| -> Result<String, Box<dyn std::error::Error>> {
         Ok(color_for(connector)?.gamma_display())
     };
+    let format_monitor_summary =
+        |monitor: &PhysicalMonitor| -> Result<String, Box<dyn std::error::Error>> {
+            Ok(format!(
+            "enabled={}, color_mode={}, supported_color_modes={}, is_underscanning={}, software brightness={}, software gamma={}",
+            monitor_enabled(config, &monitor.connector),
+            format_color_mode(color_mode(&monitor.properties)),
+            format_supported_color_modes(&supported_color_modes(&monitor.properties)),
+            property_bool(&monitor.properties, "is-underscanning")
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            format_brightness(&monitor.connector)?,
+            format_gamma(&monitor.connector)?,
+            ))
+        };
 
     Ok(match &opts.connector {
         Some(connector) => {
             let physical_monitor = config.physical_monitor(connector).ok_or(Error::NotFound)?;
             let mut output = String::new();
             if let Some(logical_monitor) = config.logical_monitor_for_connector(connector) {
-                write!(&mut output, "{}", logical_monitor)?;
+                writeln!(&mut output, "{}", logical_monitor_summary(logical_monitor))?;
             }
             writeln!(&mut output, "connector: {}", physical_monitor.connector)?;
-            writeln!(
-                &mut output,
-                "enabled: {}",
-                monitor_enabled(config, connector)
-            )?;
-            writeln!(
-                &mut output,
-                "software brightness: {}",
-                format_brightness(connector)?
-            )?;
-            writeln!(&mut output, "software gamma: {}", format_gamma(connector)?)?;
+            writeln!(&mut output, "{}", format_monitor_summary(physical_monitor)?)?;
             output
         }
         None => {
             let mut output = String::new();
-            config.format(&mut output, true)?;
-            if !output.ends_with('\n') {
-                output.push('\n');
+            for (_, logical_monitor) in config.logical_monitors.iter().enumerate() {
+                writeln!(&mut output, "{}", logical_monitor_summary(logical_monitor))?;
             }
 
             writeln!(&mut output, "outputs:")?;
             for monitor in &config.monitors {
                 writeln!(
                     &mut output,
-                    "\t{}: enabled={}, software brightness={}, software gamma={}",
+                    "\t{}: {}",
                     monitor.connector,
-                    monitor_enabled(config, &monitor.connector),
-                    format_brightness(&monitor.connector)?,
-                    format_gamma(&monitor.connector)?
+                    format_monitor_summary(monitor)?
                 )?;
             }
 
@@ -1170,10 +1276,11 @@ mod tests {
 
         let value: Value = serde_json::from_str(&output).unwrap();
 
-        assert_eq!(value["schema_version"], 4);
+        assert_eq!(value["schema_version"], 5);
         assert_eq!(value["renderer"], "native");
         assert_eq!(value["properties"]["compositor-capabilities"][0], "gamma");
         assert_eq!(value["logical_monitors"][0]["rotation"], "normal");
+        assert_eq!(value["logical_monitors"][0]["reflection"], "normal");
         assert_eq!(
             value["logical_monitors"][0]["properties"]["presentation"],
             false
@@ -1181,6 +1288,10 @@ mod tests {
         assert_eq!(value["monitors"][0]["connector"], "eDP-1");
         assert_eq!(value["monitors"][0]["enabled"], true);
         assert_eq!(value["monitors"][0]["display_name"], "Built-in display");
+        assert_eq!(value["monitors"][0]["color_mode"], "bt2100");
+        assert_eq!(value["monitors"][0]["supported_color_modes"][0], "default");
+        assert_eq!(value["monitors"][0]["supported_color_modes"][1], "bt2100");
+        assert_eq!(value["monitors"][0]["is_underscanning"], false);
         assert_eq!(
             value["monitors"][0]["properties"]["is-underscanning"],
             false
@@ -1313,6 +1424,10 @@ mod tests {
         assert!(output.contains("display:"));
         assert!(output.contains("logical monitors:"));
         assert!(output.contains("display_name: Built-in display"));
+        assert!(output.contains("reflection: normal"));
+        assert!(output.contains("color_mode: bt2100"));
+        assert!(output.contains("supported_color_modes: [default, bt2100]"));
+        assert!(output.contains("is_underscanning: false"));
         assert!(output.contains("software_brightness: 1.25 (gamma)"));
         assert!(output.contains("software_gamma: 1.2:1.1:1"));
         assert!(output.contains("refresh_rate: 60"));
@@ -1359,10 +1474,11 @@ mod tests {
         .unwrap();
 
         assert!(output.contains("outputs:"));
-        assert!(output
-            .contains("eDP-1: enabled=true, software brightness=1 (linear), software gamma=1"));
         assert!(output.contains(
-            "HDMI-1: enabled=false, software brightness=unknown, software gamma=unknown"
+            "eDP-1: enabled=true, color_mode=bt2100, supported_color_modes=[default, bt2100], is_underscanning=false, software brightness=1 (linear), software gamma=1"
+        ));
+        assert!(output.contains(
+            "HDMI-1: enabled=false, color_mode=null, supported_color_modes=[], is_underscanning=null, software brightness=unknown, software gamma=unknown"
         ));
     }
 

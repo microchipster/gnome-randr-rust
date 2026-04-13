@@ -4,6 +4,7 @@ use gnome_randr::{
     display_config::{
         logical_monitor::{LogicalMonitor, Transform},
         physical_monitor::{Mode, PhysicalMonitor},
+        proxied_methods::{ApplyMonitorProperty, ColorMode},
         ApplyConfig, ApplyMonitor, LayoutMode,
     },
     DisplayConfig,
@@ -152,6 +153,7 @@ impl<'a> MonitorPlanner<'a> {
             monitors.push(ApplyMonitor {
                 connector: &physical_monitor.connector,
                 mode_id: &mode.id,
+                properties: vec![],
             });
         }
 
@@ -248,6 +250,23 @@ impl<'a> MonitorPlanner<'a> {
 
     pub fn set_scale(&mut self, connector: &str, scale: f64) -> Result<(), Error> {
         self.target_config_mut(connector)?.scale = scale;
+        Ok(())
+    }
+
+    pub fn set_color_mode(&mut self, connector: &str, color_mode: ColorMode) -> Result<(), Error> {
+        let config = self.target_config_mut(connector)?;
+        let monitor = config
+            .monitors
+            .iter_mut()
+            .find(|monitor| monitor.connector == connector)
+            .ok_or_else(|| Error::ConnectorNotFound(connector.to_string()))?;
+
+        monitor
+            .properties
+            .retain(|property| !matches!(property, ApplyMonitorProperty::ColorMode(_)));
+        monitor
+            .properties
+            .push(ApplyMonitorProperty::ColorMode(color_mode));
         Ok(())
     }
 
@@ -399,6 +418,7 @@ impl<'a> MonitorPlanner<'a> {
             config.monitors.push(ApplyMonitor {
                 connector: connector_ref,
                 mode_id,
+                properties: vec![],
             });
         }
 

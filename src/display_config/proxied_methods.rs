@@ -1,5 +1,5 @@
 use dbus::{
-    arg::PropMap,
+    arg::{self, PropMap},
     blocking::{Connection, Proxy},
 };
 
@@ -12,16 +12,35 @@ use super::{
 
 type Result<T> = std::prelude::rust_2021::Result<T, dbus::Error>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ApplyMonitor<'a> {
     pub connector: &'a str,
     pub mode_id: &'a str,
+    pub properties: Vec<ApplyMonitorProperty>,
 }
 
 impl ApplyMonitor<'_> {
     pub fn serialize(&self) -> (&str, &str, PropMap) {
-        (self.connector, self.mode_id, PropMap::new())
+        let mut properties = PropMap::new();
+
+        for property in &self.properties {
+            match property {
+                ApplyMonitorProperty::ColorMode(color_mode) => {
+                    properties.insert(
+                        "color-mode".to_string(),
+                        arg::Variant(Box::new(color_mode.raw_value())),
+                    );
+                }
+            }
+        }
+
+        (self.connector, self.mode_id, properties)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyMonitorProperty {
+    ColorMode(ColorMode),
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +72,7 @@ impl ApplyConfig<'_> {
                     .find(|mode| mode.known_properties.is_current)
                     .unwrap()
                     .id,
+                properties: vec![],
             }],
         }
     }
@@ -141,6 +161,54 @@ impl std::str::FromStr for BrightnessFilter {
             "gamma" => Ok(BrightnessFilter::Gamma),
             "filmic" => Ok(BrightnessFilter::Filmic),
             _ => Err(format!("invalid brightness filter: {}", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Default,
+    Bt2100,
+}
+
+impl ColorMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ColorMode::Default => "default",
+            ColorMode::Bt2100 => "bt2100",
+        }
+    }
+
+    pub const fn raw_value(self) -> u32 {
+        match self {
+            ColorMode::Default => 0,
+            ColorMode::Bt2100 => 1,
+        }
+    }
+
+    pub fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(ColorMode::Default),
+            1 => Some(ColorMode::Bt2100),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ColorMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ColorMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(ColorMode::Default),
+            "bt2100" => Ok(ColorMode::Bt2100),
+            _ => Err(format!("invalid color mode: {}", value)),
         }
     }
 }
@@ -380,7 +448,9 @@ impl Resources {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrightnessFilter, Gamma, GammaAdjustment};
+    use super::{
+        ApplyMonitor, ApplyMonitorProperty, BrightnessFilter, ColorMode, Gamma, GammaAdjustment,
+    };
 
     #[test]
     fn scaling_gamma_preserves_channel_shape() {
@@ -508,5 +578,22 @@ mod tests {
             .apply_brightness(1.5, BrightnessFilter::Linear);
 
         assert!(combined.approx_eq(&sequential));
+    }
+
+    #[test]
+    fn apply_monitor_serializes_color_mode_property() {
+        let monitor = ApplyMonitor {
+            connector: "eDP-1",
+            mode_id: "1920x1080@60",
+            properties: vec![ApplyMonitorProperty::ColorMode(ColorMode::Bt2100)],
+        };
+
+        let (_, _, properties) = monitor.serialize();
+        let color_mode = properties
+            .get("color-mode")
+            .and_then(|value| value.0.as_u64())
+            .unwrap();
+
+        assert_eq!(color_mode, 1);
     }
 }

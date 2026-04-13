@@ -12,10 +12,13 @@ use super::{
 const COMPLETE_COMMAND: &str = "__complete";
 const BRIGHTNESS_VALUES: &[&str] = &["0", "0.25", "0.5", "0.75", "1", "1.25", "1.5", "2"];
 const ROTATION_VALUES: &[&str] = &["normal", "left", "right", "inverted"];
+const REFLECTION_VALUES: &[&str] = &["normal", "x", "y", "xy"];
+const COLOR_MODE_VALUES: &[&str] = &["default", "bt2100"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PendingValue {
     Rotate,
+    Reflect,
     Mode,
     Position,
     ReferenceConnector,
@@ -24,6 +27,7 @@ enum PendingValue {
     Brightness,
     Gamma,
     Filter,
+    ColorMode,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -40,6 +44,7 @@ enum CompletionKind {
         exclude: Option<String>,
     },
     Rotate,
+    Reflect,
     Mode {
         connector: Option<String>,
     },
@@ -53,6 +58,7 @@ enum CompletionKind {
     Brightness,
     Gamma,
     Filter,
+    ColorMode,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -121,6 +127,7 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
                 None
             }
             ("modify", "--rotate") | ("modify", "-r") => Some(PendingValue::Rotate),
+            ("modify", "--reflect") => Some(PendingValue::Reflect),
             ("modify", "--mode") | ("modify", "-m") => Some(PendingValue::Mode),
             ("modify", "--position") | ("modify", "--pos") => Some(PendingValue::Position),
             ("modify", "--left-of")
@@ -133,6 +140,7 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
             ("modify", "--brightness") => Some(PendingValue::Brightness),
             ("modify", "--gamma") => Some(PendingValue::Gamma),
             ("modify", "--filter") => Some(PendingValue::Filter),
+            ("modify", "--color-mode") => Some(PendingValue::ColorMode),
             _ if word.starts_with('-') => None,
             _ => {
                 if connector.is_none() {
@@ -195,6 +203,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
     let context = parse_context(subcommand_words, subcommand);
     let dynamic_option = match (subcommand.as_str(), current.split_once('=')) {
         ("modify", Some(("--rotate", fragment))) => Some((CompletionKind::Rotate, fragment)),
+        ("modify", Some(("--reflect", fragment))) => Some((CompletionKind::Reflect, fragment)),
         ("modify", Some(("--mode", fragment))) => Some((
             CompletionKind::Mode {
                 connector: context.connector.clone(),
@@ -221,6 +230,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
         }
         ("modify", Some(("--gamma", fragment))) => Some((CompletionKind::Gamma, fragment)),
         ("modify", Some(("--filter", fragment))) => Some((CompletionKind::Filter, fragment)),
+        ("modify", Some(("--color-mode", fragment))) => Some((CompletionKind::ColorMode, fragment)),
         ("modify", Some(("--left-of", fragment)))
         | ("modify", Some(("--right-of", fragment)))
         | ("modify", Some(("--above", fragment)))
@@ -257,6 +267,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             Some(PendingValue::ReferenceConnector) => Some(CompletionKind::ReferenceConnector {
                 exclude: context.connector,
             }),
+            Some(PendingValue::Reflect) => Some(CompletionKind::Reflect),
             Some(PendingValue::Scale) => Some(CompletionKind::Scale {
                 connector: context.connector,
             }),
@@ -268,6 +279,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             Some(PendingValue::Brightness) => Some(CompletionKind::Brightness),
             Some(PendingValue::Gamma) => Some(CompletionKind::Gamma),
             Some(PendingValue::Filter) => Some(CompletionKind::Filter),
+            Some(PendingValue::ColorMode) => Some(CompletionKind::ColorMode),
             _ => {
                 if connector_completion_requested(&context, current) {
                     Some(CompletionKind::Connector)
@@ -305,6 +317,9 @@ fn completion_values(kind: CompletionKind, config: &DisplayConfig, current: &str
         CompletionKind::Rotate => {
             values.extend(ROTATION_VALUES.iter().map(|value| value.to_string()));
         }
+        CompletionKind::Reflect => {
+            values.extend(REFLECTION_VALUES.iter().map(|value| value.to_string()));
+        }
         CompletionKind::Mode { connector } => {
             for monitor in select_monitors(config, connector.as_deref()) {
                 for mode in &monitor.modes {
@@ -336,6 +351,9 @@ fn completion_values(kind: CompletionKind, config: &DisplayConfig, current: &str
         }
         CompletionKind::Filter => {
             values.extend(FILTER_VALUES.iter().map(|value| value.to_string()));
+        }
+        CompletionKind::ColorMode => {
+            values.extend(COLOR_MODE_VALUES.iter().map(|value| value.to_string()));
         }
     }
 
@@ -378,6 +396,13 @@ pub fn try_handle(args: &[OsString]) -> Result<bool, Box<dyn std::error::Error>>
                         .collect(),
                     &request.current,
                 ),
+                CompletionKind::Reflect => filter_current(
+                    REFLECTION_VALUES
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                    &request.current,
+                ),
                 CompletionKind::ReferenceConnector { exclude } => {
                     let conn = Connection::new_session()?;
                     let proxy = conn.with_proxy(
@@ -404,6 +429,13 @@ pub fn try_handle(args: &[OsString]) -> Result<bool, Box<dyn std::error::Error>>
                 }
                 CompletionKind::Filter => filter_current(
                     FILTER_VALUES
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                    &request.current,
+                ),
+                CompletionKind::ColorMode => filter_current(
+                    COLOR_MODE_VALUES
                         .iter()
                         .map(|value| value.to_string())
                         .collect(),
