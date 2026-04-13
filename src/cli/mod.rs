@@ -17,7 +17,7 @@ enum Command {
     #[structopt(about = "List outputs, or inspect one output by connector such as eDP-1.")]
     Query(query::CommandOptions),
     #[structopt(
-        about = "Change one output using values reported by query, including software brightness."
+        about = "Change one output using query values, including preferred/refresh mode selection."
     )]
     Modify(modify::CommandOptions),
     #[structopt(about = "Print completions for bash, zsh, or fish.")]

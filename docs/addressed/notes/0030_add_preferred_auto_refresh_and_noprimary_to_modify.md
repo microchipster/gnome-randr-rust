@@ -34,3 +34,30 @@ These are straightforward parity wins because the current query data already exp
 - keep this note scoped to output-selection sugar on the existing single-output modify flow
 - richer query surfaces belong in `0040_add_richer_query_views_and_property_inspection.md`
 - multi-output atomic behavior belongs in `0050_build_a_transactional_multi_output_monitor_planner.md`
+
+## How This Was Addressed
+
+- added `--preferred`, `--auto`, `--refresh` with visible `--rate` alias, and `--noprimary` to `gnome-randr modify`
+- taught `--mode` to accept either a full mode id like `1920x1080@59.999` or a resolution shorthand like `1920x1080`
+- resolved `--refresh` against either the requested resolution or the current resolution, choosing the nearest available refresh advertised by Mutter
+- validated ambiguous combinations so `--refresh` cannot be paired with an exact mode id, and `--primary` / `--noprimary` conflict cleanly
+- updated dynamic completions so refresh suggestions follow the selected resolution and the new flags appear in generated shell completions
+- added unit tests for preferred, auto, refresh, resolution shorthand, and conflict handling without depending on a live display server
+
+## How To Exercise And Test It
+
+- inspect the available modes and refresh variants first:
+  - `cargo run -- query eDP-1`
+- preview preferred-mode selection:
+  - `cargo run -- modify --preferred --dry-run`
+- preview auto-mode selection:
+  - `cargo run -- modify --auto --dry-run`
+- preview resolution shorthand with nearest refresh selection:
+  - `cargo run -- modify --mode 1920x1080 --refresh 60 --dry-run`
+- preview clearing primary state explicitly:
+  - `cargo run -- modify --noprimary --dry-run`
+- confirm conflict handling for ambiguous input:
+  - `cargo run -- modify --mode 1920x1080@59.999 --refresh 60 --dry-run`
+- check dynamic completion values:
+  - `cargo run -- __complete "" modify --refresh`
+  - `cargo run -- __complete "" modify --mode 1920x1080 --refresh`

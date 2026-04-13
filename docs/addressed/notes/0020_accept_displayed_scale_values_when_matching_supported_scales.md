@@ -35,3 +35,26 @@ This is the clearest low-hanging parity bug and is already reported in `docs/una
 
 - keep this note focused on scale matching only
 - do not mix it with broader mode-selection sugar; that belongs in `0030_add_preferred_auto_refresh_and_noprimary_to_modify.md`
+
+## How This Was Addressed
+
+- added tolerant scale matching in `src/cli/common.rs` so `modify --scale` accepts the rounded values shown in `query` and resolves them back to the nearest exact supported float within half a displayed step
+- updated `src/cli/modify/mod.rs` to resolve scale values against the selected mode's advertised `supported_scales` before building the apply config
+- improved scale errors so invalid values point users back to `gnome-randr query CONNECTOR`
+- updated scale help text to say that displayed values from `query` can be typed directly
+
+Concrete file pointers:
+
+- `src/cli/common.rs`
+- `src/cli/modify/mod.rs`
+- `src/cli/modify/actions/scale.rs`
+
+## How To Exercise And Test It
+
+- inspect the advertised scales for one output:
+  - `cargo run -- query CONNECTOR`
+- apply one of the displayed scale values directly:
+  - `cargo run -- modify CONNECTOR --mode MODE --scale 1.75 --dry-run`
+- on a fractional-scaling setup where Mutter exposes a more precise internal float, repeat without `--dry-run` and confirm the change succeeds even though `query` only showed the rounded value
+- verify that an unsupported value still fails with a helpful message:
+  - `cargo run -- modify CONNECTOR --mode MODE --scale 1.73 --dry-run`

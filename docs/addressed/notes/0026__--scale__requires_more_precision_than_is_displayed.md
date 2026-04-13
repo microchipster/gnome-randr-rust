@@ -83,3 +83,24 @@ x: 0, y: 0, scale: 1.7518248558044434, rotation: normal, primary: yes
 ```
 
 For other modes, I needed to patch out the 2-decimal rounding from `impl Display for Mode`.
+
+## How This Was Addressed
+
+This bug is now fixed in the `modify --scale` path.
+
+`gnome-randr` still keeps text query output readable, but it no longer requires users to guess the full exact internal Mutter scale float. Instead, it matches the user-provided value against the selected mode's advertised supported scales, prefers an exact match when present, and otherwise chooses the nearest supported scale within the same two-decimal precision users see in `query`.
+
+Concrete file pointers:
+
+- `src/cli/common.rs`
+- `src/cli/modify/mod.rs`
+- `src/cli/query.rs`
+
+## How To Exercise And Test It
+
+- list the supported scales for your connector:
+  - `cargo run -- query CONNECTOR`
+- if `query` shows a value like `x1.75`, try it directly:
+  - `cargo run -- modify CONNECTOR --mode MODE --scale 1.75`
+- confirm that values not shown by `query` still fail cleanly and point you back to the advertised list:
+  - `cargo run -- modify CONNECTOR --mode MODE --scale 1.73`

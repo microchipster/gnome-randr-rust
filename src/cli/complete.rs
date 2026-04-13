@@ -1,9 +1,13 @@
 use std::{ffi::OsString, time::Duration};
 
 use dbus::blocking::Connection;
+use gnome_randr::display_config::physical_monitor::Mode;
 use gnome_randr::{display_config::physical_monitor::PhysicalMonitor, DisplayConfig};
 
-use super::{brightness::FILTER_VALUES, common::format_scale};
+use super::{
+    brightness::FILTER_VALUES,
+    common::{format_refresh, format_scale, parse_resolution},
+};
 
 const COMPLETE_COMMAND: &str = "__complete";
 const BRIGHTNESS_VALUES: &[&str] = &["0", "0.25", "0.5", "0.75", "1", "1.25", "1.5", "2"];
@@ -14,6 +18,7 @@ enum PendingValue {
     Rotate,
     Mode,
     Scale,
+    Refresh,
     Brightness,
     Filter,
 }
@@ -21,15 +26,24 @@ enum PendingValue {
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedContext {
     connector: Option<String>,
+    mode: Option<String>,
     pending_value: Option<PendingValue>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum CompletionKind {
     Connector,
     Rotate,
-    Mode { connector: Option<String> },
-    Scale { connector: Option<String> },
+    Mode {
+        connector: Option<String>,
+    },
+    Scale {
+        connector: Option<String>,
+    },
+    Refresh {
+        connector: Option<String>,
+        mode: Option<String>,
+    },
     Brightness,
     Filter,
 }
@@ -74,10 +88,14 @@ fn filter_current(values: Vec<String>, current: &str) -> Vec<String> {
 fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
     let mut pending_value = None;
     let mut connector = None;
+    let mut mode = None;
     let mut positional_only = false;
 
     for word in words {
-        if pending_value.take().is_some() {
+        if let Some(pending) = pending_value.take() {
+            if pending == PendingValue::Mode {
+                mode = Some(word.clone());
+            }
             continue;
         }
 
@@ -96,6 +114,7 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
             ("modify", "--rotate") | ("modify", "-r") => Some(PendingValue::Rotate),
             ("modify", "--mode") | ("modify", "-m") => Some(PendingValue::Mode),
             ("modify", "--scale") => Some(PendingValue::Scale),
+            ("modify", "--refresh") | ("modify", "--rate") => Some(PendingValue::Refresh),
             ("modify", "--brightness") => Some(PendingValue::Brightness),
             ("modify", "--filter") => Some(PendingValue::Filter),
             _ if word.starts_with('-') => None,
@@ -110,7 +129,44 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
 
     ParsedContext {
         connector,
+        mode,
         pending_value,
+    }
+}
+
+fn refresh_modes<'a>(monitor: &'a PhysicalMonitor, mode: Option<&str>) -> Vec<&'a Mode> {
+    match mode {
+        Some(value) if value.contains('@') => Vec::new(),
+        Some(value) => {
+            let (width, height) = match parse_resolution(value) {
+                Some(resolution) => resolution,
+                None => return Vec::new(),
+            };
+
+            monitor
+                .modes
+                .iter()
+                .filter(|candidate| candidate.width == width && candidate.height == height)
+                .collect()
+        }
+        None => {
+            let current = match monitor
+                .modes
+                .iter()
+                .find(|candidate| candidate.known_properties.is_current)
+            {
+                Some(current) => current,
+                None => return Vec::new(),
+            };
+
+            monitor
+                .modes
+                .iter()
+                .filter(|candidate| {
+                    candidate.width == current.width && candidate.height == current.height
+                })
+                .collect()
+        }
     }
 }
 
@@ -135,6 +191,15 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             },
             fragment,
         )),
+        ("modify", Some(("--refresh", fragment))) | ("modify", Some(("--rate", fragment))) => {
+            Some((
+                CompletionKind::Refresh {
+                    connector: context.connector.clone(),
+                    mode: context.mode.clone(),
+                },
+                fragment,
+            ))
+        }
         ("modify", Some(("--brightness", fragment))) => {
             Some((CompletionKind::Brightness, fragment))
         }
@@ -164,6 +229,10 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             }),
             Some(PendingValue::Scale) => Some(CompletionKind::Scale {
                 connector: context.connector,
+            }),
+            Some(PendingValue::Refresh) => Some(CompletionKind::Refresh {
+                connector: context.connector,
+                mode: context.mode,
             }),
             Some(PendingValue::Rotate) => Some(CompletionKind::Rotate),
             Some(PendingValue::Brightness) => Some(CompletionKind::Brightness),
@@ -214,6 +283,13 @@ fn completion_values(kind: CompletionKind, config: &DisplayConfig, current: &str
                 }
             }
         }
+        CompletionKind::Refresh { connector, mode } => {
+            for monitor in select_monitors(config, connector.as_deref()) {
+                for candidate in refresh_modes(monitor, mode.as_deref()) {
+                    push_unique(&mut values, format_refresh(candidate.refresh_rate));
+                }
+            }
+        }
         CompletionKind::Brightness => {
             values.extend(BRIGHTNESS_VALUES.iter().map(|value| value.to_string()));
         }
@@ -257,6 +333,16 @@ pub fn try_handle(args: &[OsString]) -> Result<bool, Box<dyn std::error::Error>>
                         .collect(),
                     &request.current,
                 ),
+                CompletionKind::Refresh { .. } => {
+                    let conn = Connection::new_session()?;
+                    let proxy = conn.with_proxy(
+                        "org.gnome.Mutter.DisplayConfig",
+                        "/org/gnome/Mutter/DisplayConfig",
+                        Duration::from_millis(5000),
+                    );
+                    let config = DisplayConfig::get_current_state(&proxy)?;
+                    completion_values(request.kind.clone(), &config, &request.current)
+                }
                 CompletionKind::Filter => filter_current(
                     FILTER_VALUES
                         .iter()
@@ -304,6 +390,7 @@ mod tests {
             parse_context(&words(&["eDP-1", "--mode"]), "modify"),
             ParsedContext {
                 connector: Some("eDP-1".to_string()),
+                mode: None,
                 pending_value: Some(PendingValue::Mode),
             }
         );
@@ -347,6 +434,24 @@ mod tests {
             completion_request(&words(&["modify", "--scale"]), ""),
             Some(CompletionRequest {
                 kind: CompletionKind::Scale { connector: None },
+                current: String::new(),
+                prefix: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn modify_completes_refresh_values_for_selected_resolution() {
+        assert_eq!(
+            completion_request(
+                &words(&["modify", "eDP-1", "--mode", "1920x1080", "--refresh"]),
+                ""
+            ),
+            Some(CompletionRequest {
+                kind: CompletionKind::Refresh {
+                    connector: Some("eDP-1".to_string()),
+                    mode: Some("1920x1080".to_string()),
+                },
                 current: String::new(),
                 prefix: String::new(),
             })
@@ -399,6 +504,18 @@ mod tests {
                 kind: CompletionKind::Filter,
                 current: "g".to_string(),
                 prefix: "--filter=".to_string(),
+            })
+        );
+
+        assert_eq!(
+            completion_request(&words(&["modify", "--mode", "1920x1080"]), "--rate=6"),
+            Some(CompletionRequest {
+                kind: CompletionKind::Refresh {
+                    connector: None,
+                    mode: Some("1920x1080".to_string()),
+                },
+                current: "6".to_string(),
+                prefix: "--rate=".to_string(),
             })
         );
     }

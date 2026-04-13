@@ -15,13 +15,11 @@ Capability parity matters more than syntax parity.
 ## What Is Already Landed
 
 - `query` can report logical monitor state, physical monitor state, software brightness state, and JSON output.
-- `modify` can already change mode, scale, rotation, primary, and software brightness.
+- `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, scale including displayed rounded scale values, rotation, primary or noprimary state, and software brightness.
 - dynamic shell completions and single-monitor defaults are already in place.
 
 ## Ordered Follow-up Notes
 
-- `0020_accept_displayed_scale_values_when_matching_supported_scales.md`
-- `0030_add_preferred_auto_refresh_and_noprimary_to_modify.md`
 - `0040_add_richer_query_views_and_property_inspection.md`
 - `0050_build_a_transactional_multi_output_monitor_planner.md`
 - `0060_add_real_output_disable_and_absolute_positioning.md`
@@ -46,7 +44,6 @@ Capability parity matters more than syntax parity.
 - `docs/unaddressed/issues/0013_Add_an__--off__flag.md`
 - `docs/unaddressed/issues/0020__Feature_Request___Mirroring_config.md`
 - `docs/unaddressed/issues/0021__Feature_Request___Add_capability_to_turn_off_screen_and_set.md`
-- `docs/unaddressed/issues/0026__--scale__requires_more_precision_than_is_displayed.md`
 - `docs/unaddressed/issues/0027_when_try_to_rotate_left_or_right_encounter_error_D-Bus_error.md`
 - `docs/unaddressed/issues/0028_Can_t_change_mode.md`
 - `docs/unaddressed/issues/0009_Allow_reading_a_config_file.md`

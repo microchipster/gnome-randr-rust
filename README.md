@@ -21,8 +21,8 @@ Shell completions can be generated with `gnome-randr completions bash`, `gnome-r
 
 `gnome-randr` is aiming for `xrandr` capability parity with a more modern Wayland-first CLI, not argument-for-argument syntax parity.
 
-- Implemented: query text/summary/JSON output, mode selection by id, scale, rotation, primary, software brightness with filters, dynamic shell completions, and current software brightness reporting in `query`
-- Planned next: accepting displayed scale values directly, `preferred` / `auto` / refresh-oriented mode selection, richer query views, a transactional multi-output planner, real output disable, relative placement, mirroring, software gamma, and saved profiles
+- Implemented: query text/summary/JSON output, mode selection by id or resolution with `--refresh`, `--preferred`, `--auto`, `--primary` / `--noprimary`, scale including the rounded values shown in `query`, rotation, software brightness with filters, dynamic shell completions, and current software brightness reporting in `query`
+- Planned next: richer query views, a transactional multi-output planner, real output disable, relative placement, mirroring, software gamma, and saved profiles
 - Limited by Mutter: some mirror layouts and layout-mode changes depend on what the current `org.gnome.Mutter.DisplayConfig` backend accepts at apply time
 - Unsupported with the current backend: custom modelines, arbitrary transform matrices and panning, X11 provider/CRTC controls, and framebuffer/DPI compatibility flags
 

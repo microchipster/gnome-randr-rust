@@ -1,3 +1,4 @@
+use crate::cli::common::format_scale;
 use gnome_randr::display_config::{physical_monitor::PhysicalMonitor, ApplyConfig};
 
 use super::Action;
@@ -14,6 +15,6 @@ impl Action<'_> for ScaleAction {
 
 impl std::fmt::Display for ScaleAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "setting scale to {}", self.scale)
+        write!(f, "setting scale to {}", format_scale(self.scale))
     }
 }

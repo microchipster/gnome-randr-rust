@@ -51,9 +51,48 @@ pub fn format_scale(scale: f64) -> String {
         .to_string()
 }
 
+pub fn format_refresh(refresh: f64) -> String {
+    let formatted = format!("{:.2}", refresh);
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+pub fn parse_resolution(value: &str) -> Option<(i32, i32)> {
+    let (width, height) = value.split_once('x')?;
+    Some((width.parse().ok()?, height.parse().ok()?))
+}
+
+const DISPLAYED_SCALE_TOLERANCE: f64 = 0.005_001;
+
+pub fn match_supported_scale(requested: f64, supported_scales: &[f64]) -> Option<f64> {
+    supported_scales
+        .iter()
+        .copied()
+        .find(|scale| *scale == requested)
+        .or_else(|| {
+            supported_scales
+                .iter()
+                .copied()
+                .filter(|scale| (*scale - requested).abs() <= DISPLAYED_SCALE_TOLERANCE)
+                .min_by(|left, right| {
+                    let left_distance = (*left - requested).abs();
+                    let right_distance = (*right - requested).abs();
+
+                    left_distance
+                        .partial_cmp(&right_distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_scale, resolve_connector, ConnectorError};
+    use super::{
+        format_refresh, format_scale, match_supported_scale, parse_resolution, resolve_connector,
+        ConnectorError,
+    };
 
     #[test]
     fn connector_defaults_when_only_one_output_exists() {
@@ -77,5 +116,36 @@ mod tests {
         assert_eq!(format_scale(1.0), "1");
         assert_eq!(format_scale(1.25), "1.25");
         assert_eq!(format_scale(1.50), "1.5");
+    }
+
+    #[test]
+    fn refresh_formatting_trims_trailing_zeroes() {
+        assert_eq!(format_refresh(60.0), "60");
+        assert_eq!(format_refresh(59.93), "59.93");
+    }
+
+    #[test]
+    fn resolution_parser_accepts_width_x_height() {
+        assert_eq!(parse_resolution("1920x1080"), Some((1920, 1080)));
+        assert_eq!(parse_resolution("1920xfoo"), None);
+        assert_eq!(parse_resolution("1920"), None);
+    }
+
+    #[test]
+    fn supported_scale_match_prefers_exact_match() {
+        let matched = match_supported_scale(1.75, &[1.0, 1.75, 1.7518248]).unwrap();
+        assert_eq!(matched, 1.75);
+    }
+
+    #[test]
+    fn supported_scale_match_accepts_displayed_value_within_tolerance() {
+        let matched = match_supported_scale(1.75, &[1.0, 1.7518248, 2.0]).unwrap();
+        assert_eq!(matched, 1.7518248);
+    }
+
+    #[test]
+    fn supported_scale_match_rejects_values_outside_tolerance() {
+        let matched = match_supported_scale(1.75, &[1.0, 1.76, 2.0]);
+        assert_eq!(matched, None);
     }
 }
