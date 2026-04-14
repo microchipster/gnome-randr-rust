@@ -2,12 +2,17 @@ mod planner;
 
 use std::cmp::Ordering;
 
-use gnome_randr::display_config::proxied_methods::{BrightnessFilter, ColorMode, GammaAdjustment};
+use dbus::arg::{PropMap, Variant};
+
+use gnome_randr::display_config::proxied_methods::{
+    BacklightState, BrightnessFilter, ColorMode, GammaAdjustment, NativeDisplayState, PowerSaveMode,
+};
 use gnome_randr::{
     display_config::{
         physical_monitor::Mode,
         physical_monitor::PhysicalMonitor,
         resources::{Output, Resources},
+        LayoutMode,
     },
     DisplayConfig,
 };
@@ -24,6 +29,8 @@ use gnome_randr::display_config::logical_monitor::Transform;
 
 const REFLECT_VALUES: &[&str] = &["normal", "x", "y", "xy"];
 const COLOR_MODE_VALUES: &[&str] = &["default", "bt2100"];
+const LAYOUT_MODE_VALUES: &[&str] = &["logical", "physical", "global-ui-logical"];
+const POWER_SAVE_VALUES: &[&str] = &["on", "standby", "suspend", "off"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
@@ -203,9 +210,29 @@ pub struct ActionOptions {
     #[structopt(
         long,
         help = "Disable this output",
-        long_help = "Disable this output by removing it from the applied logical-monitor layout. This is a real planner-level output disable, not a fake mode id. This conflicts with mode, preferred, auto, refresh, same-as mirroring, rotation, position, scale, primary, noprimary, and brightness options."
+        long_help = "Disable this output by removing it from the applied logical-monitor layout. This is a real planner-level output disable, not a fake mode id. This conflicts with mode, preferred, auto, refresh, same-as mirroring, layout-mode, power-save, rotation, position, scale, primary, noprimary, backlight, luminance, reset-luminance, and software color options."
     )]
     pub off: bool,
+
+    #[structopt(
+        long = "layout-mode",
+        value_name = "MODE",
+        possible_values = LAYOUT_MODE_VALUES,
+        parse(try_from_str = parse_layout_mode),
+        help = "Global layout mode: logical, physical, or global-ui-logical",
+        long_help = "Set Mutter's global layout mode. This is a Wayland-native control for the whole display configuration and does not require a connector."
+    )]
+    pub layout_mode: Option<LayoutMode>,
+
+    #[structopt(
+        long = "power-save",
+        value_name = "MODE",
+        possible_values = POWER_SAVE_VALUES,
+        parse(try_from_str = parse_power_save_mode),
+        help = "Global power-save mode: on, standby, suspend, or off",
+        long_help = "Set Mutter's global power-save mode. This is a Wayland-native control for the whole display configuration and does not require a connector."
+    )]
+    pub power_save: Option<PowerSaveMode>,
 
     #[structopt(
         long,
@@ -225,6 +252,29 @@ pub struct ActionOptions {
         long_help = "Set a known Mutter color mode on this output. Current Mutter/GNOME builds expose color modes such as default and bt2100 when the monitor supports them. This is an explicit Mutter-native property control, not generic xrandr-style property plumbing."
     )]
     pub color_mode: Option<ColorMode>,
+
+    #[structopt(
+        long,
+        value_name = "PERCENT",
+        help = "Hardware backlight percentage such as 50 or 100",
+        long_help = "Set hardware backlight through Mutter's native backlight API when the connector reports support. This is separate from software brightness and expects a percentage from 0 to 100."
+    )]
+    pub backlight: Option<i32>,
+
+    #[structopt(
+        long,
+        value_name = "PERCENT",
+        help = "Native luminance preference such as 80 or 100",
+        long_help = "Set Mutter's native per-monitor luminance preference for the current or requested color mode. This is separate from software brightness and gamma and expects a percentage from 0 to 100."
+    )]
+    pub luminance: Option<f64>,
+
+    #[structopt(
+        long = "reset-luminance",
+        help = "Reset the native luminance preference to default",
+        long_help = "Reset Mutter's native luminance preference for the current or requested color mode back to the default value for this monitor."
+    )]
+    pub reset_luminance: bool,
 
     #[structopt(
         long = "same-as",
@@ -326,7 +376,7 @@ pub struct CommandOptions {
     #[structopt(
         long,
         help = "Preview the requested changes without applying them",
-        long_help = "Preview the requested changes without applying them. This is useful to confirm the resolved connector, off/on state, same-as mirroring target, absolute or relative position, any geometry reflow after rotation or mode changes, preferred/auto/refresh-selected mode, scale, primary or noprimary state, brightness, and filter changes first."
+        long_help = "Preview the requested changes without applying them. This is useful to confirm the resolved connector, off/on state, same-as mirroring target, native layout-mode or power-save change, absolute or relative position, any geometry reflow after rotation or mode changes, preferred/auto/refresh-selected mode, scale, color mode, hardware backlight or luminance change, primary or noprimary state, and software brightness/gamma changes first."
     )]
     dry_run: bool,
 }
@@ -364,6 +414,19 @@ pub enum Error {
         requested: ColorMode,
         supported: Vec<ColorMode>,
     },
+    LayoutModeUnsupported {
+        requested: LayoutMode,
+        current: LayoutMode,
+    },
+    PowerSaveUnsupported,
+    BacklightUnsupported {
+        connector: String,
+    },
+    InvalidBacklight(i32),
+    LuminanceUnsupported {
+        connector: String,
+    },
+    InvalidLuminance(f64),
     MutterRejectedClone {
         connector: String,
         reference: String,
@@ -461,6 +524,35 @@ impl std::fmt::Display for Error {
                     .map(|mode| mode.to_string())
                     .collect::<Vec<String>>()
                     .join(", ")
+            ),
+            Error::LayoutModeUnsupported { requested, current } => write!(
+                f,
+                "fatal: requested layout mode {} but the current backend does not allow layout-mode changes from {}.",
+                requested, current
+            ),
+            Error::PowerSaveUnsupported => write!(
+                f,
+                "fatal: current GNOME/Mutter backend reports power-save mode as unsupported."
+            ),
+            Error::BacklightUnsupported { connector } => write!(
+                f,
+                "fatal: {} does not expose native backlight control through Mutter.",
+                connector
+            ),
+            Error::InvalidBacklight(value) => write!(
+                f,
+                "fatal: backlight value {} is invalid. Use an integer percentage from 0 to 100.",
+                value
+            ),
+            Error::LuminanceUnsupported { connector } => write!(
+                f,
+                "fatal: {} does not expose native luminance preferences through Mutter.",
+                connector
+            ),
+            Error::InvalidLuminance(value) => write!(
+                f,
+                "fatal: luminance value {} is invalid. Use a percentage from 0 to 100.",
+                value
             ),
             Error::MutterRejectedClone {
                 connector,
@@ -590,6 +682,36 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
             "--brightness",
         ),
         (actions.off, "--off", actions.gamma.is_some(), "--gamma"),
+        (
+            actions.off,
+            "--off",
+            actions.layout_mode.is_some(),
+            "--layout-mode",
+        ),
+        (
+            actions.off,
+            "--off",
+            actions.power_save.is_some(),
+            "--power-save",
+        ),
+        (
+            actions.off,
+            "--off",
+            actions.backlight.is_some(),
+            "--backlight",
+        ),
+        (
+            actions.off,
+            "--off",
+            actions.luminance.is_some(),
+            "--luminance",
+        ),
+        (
+            actions.off,
+            "--off",
+            actions.reset_luminance,
+            "--reset-luminance",
+        ),
         (
             actions.position.is_some(),
             "--position",
@@ -738,6 +860,30 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
             actions.color_mode.is_some(),
             "--color-mode",
         ),
+        (
+            actions.same_as.is_some(),
+            "--same-as",
+            actions.backlight.is_some(),
+            "--backlight",
+        ),
+        (
+            actions.same_as.is_some(),
+            "--same-as",
+            actions.luminance.is_some(),
+            "--luminance",
+        ),
+        (
+            actions.same_as.is_some(),
+            "--same-as",
+            actions.reset_luminance,
+            "--reset-luminance",
+        ),
+        (
+            actions.luminance.is_some(),
+            "--luminance",
+            actions.reset_luminance,
+            "--reset-luminance",
+        ),
     ];
 
     for (option_used, option, conflicting_used, conflicting) in conflicts {
@@ -752,8 +898,46 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
     Ok(())
 }
 
+fn parse_layout_mode(value: &str) -> Result<LayoutMode, String> {
+    value.parse()
+}
+
+fn parse_power_save_mode(value: &str) -> Result<PowerSaveMode, String> {
+    match value.parse::<PowerSaveMode>()? {
+        PowerSaveMode::Unknown => {
+            Err("power-save mode must be on, standby, suspend, or off".to_string())
+        }
+        mode => Ok(mode),
+    }
+}
+
 fn parse_color_mode(value: &str) -> Result<ColorMode, String> {
     value.parse()
+}
+
+fn per_output_actions_requested(actions: &ActionOptions) -> bool {
+    actions.rotation.is_some()
+        || actions.reflect.is_some()
+        || actions.mode.is_some()
+        || actions.preferred
+        || actions.auto_mode
+        || actions.refresh.is_some()
+        || actions.primary
+        || actions.noprimary
+        || actions.off
+        || actions.position.is_some()
+        || actions.color_mode.is_some()
+        || actions.backlight.is_some()
+        || actions.luminance.is_some()
+        || actions.reset_luminance
+        || actions.same_as.is_some()
+        || actions.left_of.is_some()
+        || actions.right_of.is_some()
+        || actions.above.is_some()
+        || actions.below.is_some()
+        || actions.scale.is_some()
+        || actions.brightness.is_some()
+        || actions.gamma.is_some()
 }
 
 fn rotation_transform(rotation: Rotation) -> u32 {
@@ -954,6 +1138,93 @@ fn resolve_color_mode_request(
     Ok(Some(requested))
 }
 
+fn current_color_mode(physical_monitor: &PhysicalMonitor) -> Option<ColorMode> {
+    physical_monitor
+        .properties
+        .get("color-mode")
+        .and_then(|value| value.0.as_u64())
+        .and_then(|value| ColorMode::from_raw(value as u32))
+}
+
+fn resolve_luminance_color_mode(
+    connector: &str,
+    physical_monitor: &PhysicalMonitor,
+    requested: Option<ColorMode>,
+) -> Result<ColorMode, Error> {
+    let requested = requested.or_else(|| current_color_mode(physical_monitor));
+
+    match requested {
+        Some(color_mode) => {
+            resolve_color_mode_request(connector, physical_monitor, Some(color_mode))
+                .map(|value| value.unwrap())
+        }
+        None => Err(Error::LuminanceUnsupported {
+            connector: connector.to_string(),
+        }),
+    }
+}
+
+fn layout_mode_properties(layout_mode: LayoutMode) -> PropMap {
+    let mut properties = PropMap::new();
+    properties.insert(
+        "layout-mode".to_string(),
+        Variant(Box::new(layout_mode.raw_value())),
+    );
+    properties
+}
+
+fn resolved_layout_mode(
+    config: &DisplayConfig,
+    requested: Option<LayoutMode>,
+) -> Result<Option<LayoutMode>, Error> {
+    let requested = match requested {
+        Some(requested) => requested,
+        None => return Ok(None),
+    };
+
+    if requested == config.known_properties.layout_mode {
+        return Ok(None);
+    }
+
+    if !config.known_properties.supports_changing_layout_mode {
+        return Err(Error::LayoutModeUnsupported {
+            requested,
+            current: config.known_properties.layout_mode,
+        });
+    }
+
+    Ok(Some(requested))
+}
+
+fn backlight_connector<'a>(
+    native_state: &'a NativeDisplayState,
+    connector: &str,
+) -> Option<(u32, &'a BacklightState)> {
+    native_state.backlight.as_ref().and_then(|backlight| {
+        backlight
+            .connectors
+            .iter()
+            .find(|entry| entry.connector == connector)
+            .map(|_| (backlight.serial, backlight))
+    })
+}
+
+fn validate_backlight_request(value: i32) -> Result<(), Error> {
+    if !(0..=100).contains(&value) {
+        return Err(Error::InvalidBacklight(value));
+    }
+
+    Ok(())
+}
+
+fn validate_luminance_request(value: f64) -> Result<(), Error> {
+    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+        return Err(Error::InvalidLuminance(value));
+    }
+
+    Ok(())
+}
+
 fn compare_mode_priority(left: &Mode, right: &Mode) -> Ordering {
     left.known_properties
         .is_preferred
@@ -1152,22 +1423,43 @@ pub fn handle(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_actions(&opts.actions)?;
 
-    let connector = resolve_connector(
-        opts.connector.as_deref(),
-        config
-            .monitors
-            .iter()
-            .map(|monitor| monitor.connector.as_str()),
-    )?;
-    let physical_monitor = config.physical_monitor(&connector).ok_or(Error::NotFound)?;
-    let logical_monitor = config.logical_monitor_for_connector(&connector);
+    let needs_connector = per_output_actions_requested(&opts.actions);
+    let connector = if needs_connector {
+        Some(resolve_connector(
+            opts.connector.as_deref(),
+            config
+                .monitors
+                .iter()
+                .map(|monitor| monitor.connector.as_str()),
+        )?)
+    } else {
+        None
+    };
+    let physical_monitor = connector
+        .as_deref()
+        .and_then(|connector| config.physical_monitor(connector));
+    let logical_monitor = connector
+        .as_deref()
+        .and_then(|connector| config.logical_monitor_for_connector(connector));
     let output_enabled = logical_monitor.is_some();
     let current_transform = logical_monitor
         .map(|logical_monitor| logical_monitor.transform.bits())
         .unwrap_or(Transform::NORMAL.bits());
+    let resolved_layout_mode = resolved_layout_mode(config, opts.actions.layout_mode)?;
+    let power_save_mode = opts.actions.power_save;
     let brightness = opts.actions.brightness;
     let gamma_adjustment = opts.actions.gamma;
     let same_as = opts.actions.same_as.as_deref();
+    let native_controls_requested = resolved_layout_mode.is_some()
+        || power_save_mode.is_some()
+        || opts.actions.backlight.is_some()
+        || opts.actions.luminance.is_some()
+        || opts.actions.reset_luminance;
+    let native_state = if native_controls_requested {
+        Some(DisplayConfig::native_display_state(proxy)?)
+    } else {
+        None
+    };
     let resources = if brightness.is_some() || gamma_adjustment.is_some() || same_as.is_some() {
         Some(Resources::get_resources(proxy)?)
     } else {
@@ -1175,9 +1467,9 @@ pub fn handle(
     };
     let clone_request = match same_as {
         Some(reference) => Some(resolve_clone_request(
-            &connector,
+            connector.as_deref().unwrap(),
             reference,
-            physical_monitor,
+            physical_monitor.ok_or(Error::NotFound)?,
             config,
             resources.as_ref().unwrap(),
         )?),
@@ -1186,28 +1478,102 @@ pub fn handle(
     let resolved_mode = if opts.actions.off || clone_request.is_some() {
         None
     } else {
-        if !output_enabled {
+        if needs_connector && !output_enabled {
             return Err(Error::OutputDisabled {
-                connector: connector.clone(),
+                connector: connector.clone().unwrap(),
             }
             .into());
         }
-        resolve_mode(physical_monitor, &connector, &opts.actions)?
+        match (physical_monitor, connector.as_deref()) {
+            (Some(physical_monitor), Some(connector)) => {
+                resolve_mode(physical_monitor, connector, &opts.actions)?
+            }
+            _ => None,
+        }
     };
     let resolved_scale = if opts.actions.off || clone_request.is_some() {
         None
     } else {
-        resolve_scale(
-            physical_monitor,
-            &connector,
-            resolved_mode,
-            opts.actions.scale,
-        )?
+        match (physical_monitor, connector.as_deref()) {
+            (Some(physical_monitor), Some(connector)) => resolve_scale(
+                physical_monitor,
+                connector,
+                resolved_mode,
+                opts.actions.scale,
+            )?,
+            _ => None,
+        }
     };
     let resolved_color_mode = if opts.actions.off || clone_request.is_some() {
         None
     } else {
-        resolve_color_mode_request(&connector, physical_monitor, opts.actions.color_mode)?
+        match (physical_monitor, connector.as_deref()) {
+            (Some(physical_monitor), Some(connector)) => {
+                resolve_color_mode_request(connector, physical_monitor, opts.actions.color_mode)?
+            }
+            _ => None,
+        }
+    };
+    let resolved_backlight = match (
+        opts.actions.backlight,
+        connector.as_deref(),
+        native_state.as_ref(),
+    ) {
+        (Some(value), Some(connector), Some(native_state)) => {
+            validate_backlight_request(value)?;
+            if backlight_connector(native_state, connector).is_none() {
+                return Err(Error::BacklightUnsupported {
+                    connector: connector.to_string(),
+                }
+                .into());
+            }
+            Some(value)
+        }
+        _ => None,
+    };
+    let resolved_luminance_color_mode = match (
+        opts.actions.luminance,
+        opts.actions.reset_luminance,
+        connector.as_deref(),
+        physical_monitor,
+        native_state.as_ref(),
+    ) {
+        (Some(luminance), _, Some(connector), Some(physical_monitor), Some(native_state)) => {
+            validate_luminance_request(luminance)?;
+            if !native_state
+                .luminance
+                .iter()
+                .any(|entry| entry.connector == connector)
+            {
+                return Err(Error::LuminanceUnsupported {
+                    connector: connector.to_string(),
+                }
+                .into());
+            }
+            Some(resolve_luminance_color_mode(
+                connector,
+                physical_monitor,
+                resolved_color_mode,
+            )?)
+        }
+        (None, true, Some(connector), Some(physical_monitor), Some(native_state)) => {
+            if !native_state
+                .luminance
+                .iter()
+                .any(|entry| entry.connector == connector)
+            {
+                return Err(Error::LuminanceUnsupported {
+                    connector: connector.to_string(),
+                }
+                .into());
+            }
+            Some(resolve_luminance_color_mode(
+                connector,
+                physical_monitor,
+                resolved_color_mode,
+            )?)
+        }
+        _ => None,
     };
     let relative_placement = relative_placement_request(&opts.actions);
     let target_transform = effective_transform(
@@ -1225,6 +1591,7 @@ pub fn handle(
     let has_layout_changes = opts.actions.off
         || clone_request.is_some()
         || target_transform.is_some()
+        || resolved_layout_mode.is_some()
         || opts.actions.position.is_some()
         || relative_placement.is_some()
         || resolved_mode.is_some()
@@ -1233,19 +1600,39 @@ pub fn handle(
         || resolved_scale.is_some()
         || resolved_color_mode.is_some();
 
-    if has_layout_changes && !opts.actions.off && clone_request.is_none() && !output_enabled {
+    if has_layout_changes
+        && needs_connector
+        && !opts.actions.off
+        && clone_request.is_none()
+        && !output_enabled
+    {
         return Err(Error::OutputDisabled {
-            connector: connector.clone(),
+            connector: connector.clone().unwrap(),
         }
         .into());
     }
 
-    if opts.actions.off && !output_enabled && brightness.is_none() && gamma_adjustment.is_none() {
+    if opts.actions.off
+        && needs_connector
+        && !output_enabled
+        && brightness.is_none()
+        && gamma_adjustment.is_none()
+        && resolved_backlight.is_none()
+        && opts.actions.luminance.is_none()
+        && !opts.actions.reset_luminance
+    {
         println!("no changes made.");
         return Ok(());
     }
 
-    if !has_layout_changes && brightness.is_none() && gamma_adjustment.is_none() {
+    if !has_layout_changes
+        && brightness.is_none()
+        && gamma_adjustment.is_none()
+        && power_save_mode.is_none()
+        && resolved_backlight.is_none()
+        && opts.actions.luminance.is_none()
+        && !opts.actions.reset_luminance
+    {
         println!("no changes made.");
         return Ok(());
     }
@@ -1262,24 +1649,42 @@ pub fn handle(
                 println!("attempting to persist config to disk")
             }
 
-            let old_geometry = if !opts.actions.off && geometry_changes && !explicit_placement {
-                Some(planner.as_ref().unwrap().geometry(&connector)?)
+            if let Some(layout_mode) = resolved_layout_mode {
+                println!("setting layout mode to {}", layout_mode);
+            }
+
+            let old_geometry = if connector.is_some()
+                && !opts.actions.off
+                && geometry_changes
+                && !explicit_placement
+            {
+                Some(
+                    planner
+                        .as_ref()
+                        .unwrap()
+                        .geometry(connector.as_deref().unwrap())?,
+                )
             } else {
                 None
             };
 
             if opts.actions.off {
-                println!("disabling output {}", connector);
-                planner.as_mut().unwrap().remove_output(&connector)?;
+                println!("disabling output {}", connector.as_deref().unwrap());
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .remove_output(connector.as_deref().unwrap())?;
             }
 
             if let Some(clone) = &clone_request {
                 println!(
                     "mirroring output {} same as {} using mode {}",
-                    connector, clone.reference, clone.mode.id
+                    connector.as_deref().unwrap(),
+                    clone.reference,
+                    clone.mode.id
                 );
                 planner.as_mut().unwrap().clone_with(
-                    &connector,
+                    connector.as_deref().unwrap(),
                     clone.reference,
                     &clone.mode.id,
                 )?;
@@ -1297,17 +1702,23 @@ pub fn handle(
                 planner
                     .as_mut()
                     .unwrap()
-                    .set_transform(&connector, transform)?;
+                    .set_transform(connector.as_deref().unwrap(), transform)?;
             }
 
             if let Some(mode) = resolved_mode {
                 println!("setting mode to {}", mode.id);
-                planner.as_mut().unwrap().set_mode(&connector, &mode.id)?;
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .set_mode(connector.as_deref().unwrap(), &mode.id)?;
             }
 
             if let Some(scale) = resolved_scale {
                 println!("setting scale to {}", format_scale(scale));
-                planner.as_mut().unwrap().set_scale(&connector, scale)?;
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .set_scale(connector.as_deref().unwrap(), scale)?;
             }
 
             if let Some(color_mode) = resolved_color_mode {
@@ -1315,24 +1726,25 @@ pub fn handle(
                 planner
                     .as_mut()
                     .unwrap()
-                    .set_color_mode(&connector, color_mode)?;
+                    .set_color_mode(connector.as_deref().unwrap(), color_mode)?;
             }
 
             if let Some(position) = opts.actions.position {
                 println!("setting position to {}", position);
-                planner
-                    .as_mut()
-                    .unwrap()
-                    .set_position(&connector, position.x, position.y)?;
+                planner.as_mut().unwrap().set_position(
+                    connector.as_deref().unwrap(),
+                    position.x,
+                    position.y,
+                )?;
             } else if let Some(relative) = relative_placement {
                 let (x, y) = planner.as_mut().unwrap().place_relative(
-                    &connector,
+                    connector.as_deref().unwrap(),
                     relative.reference,
                     relative.placement,
                 )?;
                 println!(
                     "placing output {} {} at {},{}",
-                    connector,
+                    connector.as_deref().unwrap(),
                     relative.placement.describe(),
                     x,
                     y
@@ -1341,8 +1753,11 @@ pub fn handle(
                 planner
                     .as_mut()
                     .unwrap()
-                    .reflow_after_geometry_change(&connector, old_geometry)?;
-                let (x, y) = planner.as_ref().unwrap().position(&connector)?;
+                    .reflow_after_geometry_change(connector.as_deref().unwrap(), old_geometry)?;
+                let (x, y) = planner
+                    .as_ref()
+                    .unwrap()
+                    .position(connector.as_deref().unwrap())?;
                 println!(
                     "resolved final position to {},{} after geometry reflow",
                     x, y
@@ -1351,18 +1766,54 @@ pub fn handle(
 
             if opts.actions.primary {
                 println!("setting monitor as primary");
-                planner.as_mut().unwrap().set_primary(&connector)?;
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .set_primary(connector.as_deref().unwrap())?;
             }
 
             if opts.actions.noprimary {
                 println!("clearing primary status from this monitor");
-                planner.as_mut().unwrap().clear_primary(&connector)?;
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .clear_primary(connector.as_deref().unwrap())?;
+            }
+        }
+
+        if let Some(mode) = power_save_mode {
+            println!("setting power save mode to {}", mode);
+        }
+
+        if let Some(backlight) = resolved_backlight {
+            println!(
+                "setting hardware backlight on {} to {}",
+                connector.as_deref().unwrap(),
+                backlight
+            );
+        }
+
+        if let Some(color_mode) = resolved_luminance_color_mode {
+            if let Some(luminance) = opts.actions.luminance {
+                println!(
+                    "setting luminance on {} for {} to {}",
+                    connector.as_deref().unwrap(),
+                    color_mode,
+                    luminance
+                );
+            }
+            if opts.actions.reset_luminance {
+                println!(
+                    "resetting luminance on {} for {}",
+                    connector.as_deref().unwrap(),
+                    color_mode
+                );
             }
         }
 
         if brightness.is_some() || gamma_adjustment.is_some() {
             brightness::apply_color(
-                &connector,
+                connector.as_deref().unwrap(),
                 brightness,
                 opts.actions.filter,
                 gamma_adjustment,
@@ -1381,26 +1832,45 @@ pub fn handle(
             println!("attempting to persist config to disk")
         }
 
-        let old_geometry = if !opts.actions.off && geometry_changes && !explicit_placement {
-            Some(planner.as_ref().unwrap().geometry(&connector)?)
+        let old_geometry = if connector.is_some()
+            && !opts.actions.off
+            && geometry_changes
+            && !explicit_placement
+        {
+            Some(
+                planner
+                    .as_ref()
+                    .unwrap()
+                    .geometry(connector.as_deref().unwrap())?,
+            )
         } else {
             None
         };
 
+        if let Some(layout_mode) = resolved_layout_mode {
+            println!("setting layout mode to {}", layout_mode);
+        }
+
         if opts.actions.off {
-            println!("disabling output {}", connector);
-            planner.as_mut().unwrap().remove_output(&connector)?;
+            println!("disabling output {}", connector.as_deref().unwrap());
+            planner
+                .as_mut()
+                .unwrap()
+                .remove_output(connector.as_deref().unwrap())?;
         }
 
         if let Some(clone) = &clone_request {
             println!(
                 "mirroring output {} same as {} using mode {}",
-                connector, clone.reference, clone.mode.id
+                connector.as_deref().unwrap(),
+                clone.reference,
+                clone.mode.id
             );
-            planner
-                .as_mut()
-                .unwrap()
-                .clone_with(&connector, clone.reference, &clone.mode.id)?;
+            planner.as_mut().unwrap().clone_with(
+                connector.as_deref().unwrap(),
+                clone.reference,
+                &clone.mode.id,
+            )?;
         }
 
         if let Some(rotation) = &opts.actions.rotation {
@@ -1415,17 +1885,23 @@ pub fn handle(
             planner
                 .as_mut()
                 .unwrap()
-                .set_transform(&connector, transform)?;
+                .set_transform(connector.as_deref().unwrap(), transform)?;
         }
 
         if let Some(mode) = resolved_mode {
             println!("setting mode to {}", mode.id);
-            planner.as_mut().unwrap().set_mode(&connector, &mode.id)?;
+            planner
+                .as_mut()
+                .unwrap()
+                .set_mode(connector.as_deref().unwrap(), &mode.id)?;
         }
 
         if let Some(scale) = resolved_scale {
             println!("setting scale to {}", format_scale(scale));
-            planner.as_mut().unwrap().set_scale(&connector, scale)?;
+            planner
+                .as_mut()
+                .unwrap()
+                .set_scale(connector.as_deref().unwrap(), scale)?;
         }
 
         if let Some(color_mode) = resolved_color_mode {
@@ -1433,24 +1909,25 @@ pub fn handle(
             planner
                 .as_mut()
                 .unwrap()
-                .set_color_mode(&connector, color_mode)?;
+                .set_color_mode(connector.as_deref().unwrap(), color_mode)?;
         }
 
         if let Some(position) = opts.actions.position {
             println!("setting position to {}", position);
-            planner
-                .as_mut()
-                .unwrap()
-                .set_position(&connector, position.x, position.y)?;
+            planner.as_mut().unwrap().set_position(
+                connector.as_deref().unwrap(),
+                position.x,
+                position.y,
+            )?;
         } else if let Some(relative) = relative_placement {
             let (x, y) = planner.as_mut().unwrap().place_relative(
-                &connector,
+                connector.as_deref().unwrap(),
                 relative.reference,
                 relative.placement,
             )?;
             println!(
                 "placing output {} {} at {},{}",
-                connector,
+                connector.as_deref().unwrap(),
                 relative.placement.describe(),
                 x,
                 y
@@ -1459,8 +1936,11 @@ pub fn handle(
             planner
                 .as_mut()
                 .unwrap()
-                .reflow_after_geometry_change(&connector, old_geometry)?;
-            let (x, y) = planner.as_ref().unwrap().position(&connector)?;
+                .reflow_after_geometry_change(connector.as_deref().unwrap(), old_geometry)?;
+            let (x, y) = planner
+                .as_ref()
+                .unwrap()
+                .position(connector.as_deref().unwrap())?;
             println!(
                 "resolved final position to {},{} after geometry reflow",
                 x, y
@@ -1469,20 +1949,33 @@ pub fn handle(
 
         if opts.actions.primary {
             println!("setting monitor as primary");
-            planner.as_mut().unwrap().set_primary(&connector)?;
+            planner
+                .as_mut()
+                .unwrap()
+                .set_primary(connector.as_deref().unwrap())?;
         }
 
         if opts.actions.noprimary {
             println!("clearing primary status from this monitor");
-            planner.as_mut().unwrap().clear_primary(&connector)?;
+            planner
+                .as_mut()
+                .unwrap()
+                .clear_primary(connector.as_deref().unwrap())?;
         }
 
-        if let Err(error) =
-            config.apply_monitors_config(proxy, planner.unwrap().into_configs(), opts.persistent)
-        {
+        let layout_properties = resolved_layout_mode
+            .map(layout_mode_properties)
+            .unwrap_or_else(PropMap::new);
+
+        if let Err(error) = config.apply_monitors_config_with_properties(
+            proxy,
+            planner.unwrap().into_configs(),
+            opts.persistent,
+            layout_properties,
+        ) {
             if let Some(clone) = &clone_request {
                 return Err(Error::MutterRejectedClone {
-                    connector: connector.clone(),
+                    connector: connector.clone().unwrap(),
                     reference: clone.reference.to_string(),
                     details: error.to_string(),
                 }
@@ -1493,9 +1986,49 @@ pub fn handle(
         }
     }
 
+    if let Some(mode) = power_save_mode {
+        if native_state
+            .as_ref()
+            .map(|state| state.power_save_mode == PowerSaveMode::Unknown)
+            .unwrap_or(true)
+        {
+            return Err(Error::PowerSaveUnsupported.into());
+        }
+        println!("setting power save mode to {}", mode);
+        DisplayConfig::set_power_save_mode_native(proxy, mode)?;
+    }
+
+    if let Some(backlight) = resolved_backlight {
+        let connector = connector.as_deref().unwrap();
+        let (serial, _) = backlight_connector(native_state.as_ref().unwrap(), connector)
+            .ok_or_else(|| Error::BacklightUnsupported {
+                connector: connector.to_string(),
+            })?;
+        println!(
+            "setting hardware backlight on {} to {}",
+            connector, backlight
+        );
+        DisplayConfig::set_backlight(proxy, serial, connector, backlight)?;
+    }
+
+    if let Some(color_mode) = resolved_luminance_color_mode {
+        let connector = connector.as_deref().unwrap();
+        if let Some(luminance) = opts.actions.luminance {
+            println!(
+                "setting luminance on {} for {} to {}",
+                connector, color_mode, luminance
+            );
+            DisplayConfig::set_luminance(proxy, connector, color_mode, luminance)?;
+        }
+        if opts.actions.reset_luminance {
+            println!("resetting luminance on {} for {}", connector, color_mode);
+            DisplayConfig::reset_luminance(proxy, connector, color_mode)?;
+        }
+    }
+
     if brightness.is_some() || gamma_adjustment.is_some() {
         brightness::apply_color(
-            &connector,
+            connector.as_deref().unwrap(),
             brightness,
             opts.actions.filter,
             gamma_adjustment,
@@ -1531,7 +2064,12 @@ mod tests {
             primary: false,
             noprimary: false,
             off: false,
+            layout_mode: None,
+            power_save: None,
             position: None,
+            backlight: None,
+            luminance: None,
+            reset_luminance: false,
             same_as: None,
             left_of: None,
             right_of: None,

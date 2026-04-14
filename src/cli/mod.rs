@@ -20,7 +20,7 @@ enum Command {
     )]
     Query(query::CommandOptions),
     #[structopt(
-        about = "Change one output using query values, including reflect, color mode, software color, mirroring, and layout controls."
+        about = "Change outputs using query values, including native layout-mode, power-save, backlight, luminance, software color, mirroring, and layout controls."
     )]
     Modify(modify::CommandOptions),
     #[structopt(about = "Apply a saved layout file generated from query --json.")]
@@ -32,7 +32,7 @@ enum Command {
 #[derive(StructOpt)]
 #[structopt(
     about = "A program to query information about and manipulate displays on Gnome with Wayland.",
-    long_about = "A program to query information about and manipulate displays on Gnome with Wayland.\n\nDefault command is `query`. Run \"gnome-randr query\" first to list connector names such as \"eDP-1\" or \"HDMI-1\", whether each output is currently enabled, valid mode ids and scale factors, current software brightness and gamma state, typed reflection and color-mode state, and richer text views such as `--listmonitors`, `--verbose`, and `--properties`. The documented `query --json` schema can also be saved and later applied with `gnome-randr apply FILE`."
+    long_about = "A program to query information about and manipulate displays on Gnome with Wayland.\n\nDefault command is `query`. Run \"gnome-randr query\" first to list connector names such as \"eDP-1\" or \"HDMI-1\", whether each output is currently enabled, valid mode ids and scale factors, current software brightness and gamma state, typed reflection/color-mode state, native power-save and luminance state, and richer text views such as `--listmonitors`, `--verbose`, and `--properties`. The documented `query --json` schema can also be saved and later applied with `gnome-randr apply FILE`."
 )]
 struct CLI {
     #[structopt(subcommand)]

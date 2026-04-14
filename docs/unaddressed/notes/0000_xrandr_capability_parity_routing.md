@@ -14,27 +14,26 @@ Capability parity matters more than syntax parity.
 
 ## What Is Already Landed
 
-- `query` can report logical monitor state, physical monitor state, enabled state for disabled outputs, typed rotation/reflection state, typed color-mode and underscanning visibility, software brightness state, software gamma state, JSON output, raw property maps, and xrandr-style logical monitor list views.
-- `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, disable outputs with `--off`, set absolute positions with `--position` / `--pos`, place outputs relative to each other with `--left-of` / `--right-of` / `--above` / `--below`, request same-as mirroring with local clone preflight, reflow adjacent layouts after geometry-changing rotations, reflect outputs with `--reflect`, set supported color modes with `--color-mode`, scale including displayed rounded scale values, rotation, primary or noprimary state, software brightness, and software gamma, and it now plans changes through one full transactional config payload internally.
-- `apply FILE` can restore a saved `query --json` layout by monitor identity and replay managed software brightness and gamma afterward.
+- `query` can report logical monitor state, physical monitor state, enabled state for disabled outputs, typed rotation/reflection state, typed color-mode and underscanning visibility, native power-save/backlight/luminance state, software brightness state, software gamma state, JSON output, raw property maps, and xrandr-style logical monitor list views.
+- `modify` can already change mode by id or resolution, choose nearest refresh, use preferred or auto mode selection, disable outputs with `--off`, set absolute positions with `--position` / `--pos`, place outputs relative to each other with `--left-of` / `--right-of` / `--above` / `--below`, request same-as mirroring with local clone preflight, reflow adjacent layouts after geometry-changing rotations, reflect outputs with `--reflect`, set supported color modes with `--color-mode`, set native layout mode, power-save, backlight, and luminance controls, scale including displayed rounded scale values, rotation, primary or noprimary state, software brightness, and software gamma, and it now plans changes through one full transactional config payload internally.
+- `apply FILE` can restore a saved `query --json` layout by monitor identity, replay supported layout-mode changes, and replay managed software brightness and gamma afterward.
 - dynamic shell completions and single-monitor defaults are already in place.
 
 ## Ordered Follow-up Notes
 
-- `0120_add_wayland_native_backlight_power_save_and_layout_mode_controls.md`
-- `0130_document_backend_limits_and_reroute_non_mappable_xrandr_requests.md`
+- None. The parity track is functionally complete for the current backend.
 
 ## Why The Work Is Split This Way
 
 - `0020` through `0040` were the easiest parity wins and mostly extended existing query/modify flows.
 - `0050` established the architectural prerequisite for the bigger layout features.
 - `0060` through `0080` established the core topology-control foundation after the planner, including same-as mirroring where Mutter accepts it.
-- `0090` through `0110` landed software color, the supported reflection/property-control slice, and file-based saved-layout restore; `0120` expands the remaining Wayland-native capabilities.
-- `0130` keeps the backlog honest about what the Mutter D-Bus backend can and cannot represent.
+- `0090` through `0120` landed software color, the supported reflection/property-control slice, file-based saved-layout restore, and the Wayland-native layout-mode/power-save/backlight/luminance controls.
+- `0130` closes the loop by documenting what the Mutter D-Bus backend still cannot represent and rerouting those requests out of the active implementation track.
 
 ## Existing Backlog This Reroutes
 
-- `docs/unaddressed/issues/0028_Can_t_change_mode.md`
+- None. The backend-limit reroutes have been moved into addressed notes.
 
 ## Success Criteria For The Whole Track
 

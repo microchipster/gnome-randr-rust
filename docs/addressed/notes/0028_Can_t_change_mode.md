@@ -84,3 +84,18 @@ Thanks for the support and help.
 ---
 **maxwellainatchi** at 2025-02-27T18:56:03Z
 I don't really have a setup to test against anymore, unfortunately, but I don't think the dbus interface supports adding modes, only picking from the list
+
+## How This Was Addressed
+
+- documented this as a backend limit rather than leaving it in the active implementation backlog
+- clarified in `README.md` that `gnome-randr` can only select modes that Mutter already exposes in `query` / `query --json`
+- clarified that adding new modelines or arbitrary custom modes would require different backend support or upstream Mutter changes, not just another CLI flag in this repository
+
+## How To Exercise And Test It
+
+- inspect the modes Mutter currently exposes for a connector:
+  - `cargo run -- query DP-1`
+- try selecting only a mode that already appears in the query output:
+  - `cargo run -- modify DP-1 --mode 1024x768@60.004 --dry-run`
+- compare that with the backend-limit explanation in the README:
+  - `rg -n "custom modelines|mode injection|Backend Limits" README.md`

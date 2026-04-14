@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 use dbus::{
     arg::{self, PropMap},
     blocking::{Connection, Proxy},
@@ -53,6 +55,157 @@ pub struct ApplyConfig<'a> {
     pub monitors: Vec<ApplyMonitor<'a>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerSaveMode {
+    Unknown,
+    On,
+    Standby,
+    Suspend,
+    Off,
+}
+
+impl PowerSaveMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PowerSaveMode::Unknown => "unknown",
+            PowerSaveMode::On => "on",
+            PowerSaveMode::Standby => "standby",
+            PowerSaveMode::Suspend => "suspend",
+            PowerSaveMode::Off => "off",
+        }
+    }
+
+    pub const fn raw_value(self) -> i32 {
+        match self {
+            PowerSaveMode::Unknown => -1,
+            PowerSaveMode::On => 0,
+            PowerSaveMode::Standby => 1,
+            PowerSaveMode::Suspend => 2,
+            PowerSaveMode::Off => 3,
+        }
+    }
+
+    pub fn from_raw(value: i32) -> Option<Self> {
+        match value {
+            -1 => Some(PowerSaveMode::Unknown),
+            0 => Some(PowerSaveMode::On),
+            1 => Some(PowerSaveMode::Standby),
+            2 => Some(PowerSaveMode::Suspend),
+            3 => Some(PowerSaveMode::Off),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PowerSaveMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PowerSaveMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "on" => Ok(PowerSaveMode::On),
+            "standby" => Ok(PowerSaveMode::Standby),
+            "suspend" => Ok(PowerSaveMode::Suspend),
+            "off" => Ok(PowerSaveMode::Off),
+            "unknown" => Ok(PowerSaveMode::Unknown),
+            _ => Err(format!("invalid power save mode: {}", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BacklightState {
+    pub serial: u32,
+    pub connectors: Vec<BacklightConnector>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BacklightConnector {
+    pub connector: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LuminanceState {
+    pub connector: String,
+    pub color_mode: ColorMode,
+    pub luminance: f64,
+    pub default: f64,
+    pub is_unset: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeDisplayState {
+    pub power_save_mode: PowerSaveMode,
+    pub panel_orientation_managed: bool,
+    pub apply_monitors_config_allowed: Option<bool>,
+    pub night_light_supported: Option<bool>,
+    pub has_external_monitor: Option<bool>,
+    pub backlight: Option<BacklightState>,
+    pub luminance: Vec<LuminanceState>,
+}
+
+fn prop_string(properties: &PropMap, key: &str) -> Option<String> {
+    properties
+        .get(key)
+        .and_then(|value| value.0.as_str())
+        .map(str::to_owned)
+}
+
+fn prop_bool(properties: &PropMap, key: &str) -> Option<bool> {
+    properties
+        .get(key)
+        .and_then(|value| value.0.as_u64())
+        .map(|value| value != 0)
+}
+
+fn prop_f64(properties: &PropMap, key: &str) -> Option<f64> {
+    properties.get(key).and_then(|value| value.0.as_f64())
+}
+
+fn prop_u32(properties: &PropMap, key: &str) -> Option<u32> {
+    properties
+        .get(key)
+        .and_then(|value| value.0.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn parse_backlight_state(raw: (u32, Vec<PropMap>)) -> BacklightState {
+    BacklightState {
+        serial: raw.0,
+        connectors: raw
+            .1
+            .into_iter()
+            .filter_map(|entry| {
+                Some(BacklightConnector {
+                    connector: prop_string(&entry, "connector")?,
+                    active: prop_bool(&entry, "active").unwrap_or(false),
+                })
+            })
+            .collect(),
+    }
+}
+
+fn parse_luminance_state(entries: Vec<PropMap>) -> Vec<LuminanceState> {
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            Some(LuminanceState {
+                connector: prop_string(&entry, "connector")?,
+                color_mode: ColorMode::from_raw(prop_u32(&entry, "color-mode")?)?,
+                luminance: prop_f64(&entry, "luminance")?,
+                default: prop_f64(&entry, "default")?,
+                is_unset: prop_bool(&entry, "is-unset").unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
 impl ApplyConfig<'_> {
     pub fn from<'a>(
         logical_monitor: &LogicalMonitor,
@@ -93,11 +246,12 @@ impl ApplyConfig<'_> {
 }
 
 impl DisplayConfig {
-    pub fn apply_monitors_config(
+    pub fn apply_monitors_config_with_properties(
         &self,
         proxy: &Proxy<&Connection>,
         configs: Vec<ApplyConfig>,
         persistent: bool,
+        properties: PropMap,
     ) -> Result<()> {
         use super::raw::OrgGnomeMutterDisplayConfig;
 
@@ -105,7 +259,7 @@ impl DisplayConfig {
             self.serial,
             if persistent { 2 } else { 1 },
             configs.iter().map(|config| config.serialize()).collect(),
-            PropMap::new(),
+            properties,
         );
 
         if let Err(err) = &result {
@@ -114,11 +268,97 @@ impl DisplayConfig {
         result
     }
 
+    pub fn apply_monitors_config(
+        &self,
+        proxy: &Proxy<&Connection>,
+        configs: Vec<ApplyConfig>,
+        persistent: bool,
+    ) -> Result<()> {
+        self.apply_monitors_config_with_properties(proxy, configs, persistent, PropMap::new())
+    }
+
     pub fn get_current_state(proxy: &Proxy<&Connection>) -> Result<DisplayConfig> {
         use super::raw::OrgGnomeMutterDisplayConfig;
 
         let raw_output = proxy.get_current_state()?;
         Ok(DisplayConfig::from(raw_output))
+    }
+
+    pub fn native_display_state(proxy: &Proxy<&Connection>) -> Result<NativeDisplayState> {
+        use super::raw::OrgFreedesktopDBusProperties;
+        use super::raw::OrgGnomeMutterDisplayConfig;
+
+        let power_save_mode = proxy
+            .power_save_mode()
+            .ok()
+            .and_then(PowerSaveMode::from_raw)
+            .unwrap_or(PowerSaveMode::Unknown);
+        let properties = proxy.get_all("org.gnome.Mutter.DisplayConfig")?;
+        let backlight = proxy
+            .get::<(u32, Vec<PropMap>)>("org.gnome.Mutter.DisplayConfig", "Backlight")
+            .ok()
+            .map(parse_backlight_state);
+        let luminance = proxy
+            .get::<Vec<PropMap>>("org.gnome.Mutter.DisplayConfig", "Luminance")
+            .ok()
+            .map(parse_luminance_state)
+            .unwrap_or_default();
+
+        Ok(NativeDisplayState {
+            power_save_mode,
+            panel_orientation_managed: proxy.panel_orientation_managed().unwrap_or(false),
+            apply_monitors_config_allowed: prop_bool(&properties, "ApplyMonitorsConfigAllowed"),
+            night_light_supported: prop_bool(&properties, "NightLightSupported"),
+            has_external_monitor: prop_bool(&properties, "HasExternalMonitor"),
+            backlight,
+            luminance,
+        })
+    }
+
+    pub fn set_power_save_mode_native(
+        proxy: &Proxy<&Connection>,
+        mode: PowerSaveMode,
+    ) -> Result<()> {
+        use super::raw::OrgGnomeMutterDisplayConfig;
+        proxy.set_power_save_mode(mode.raw_value())
+    }
+
+    pub fn set_backlight(
+        proxy: &Proxy<&Connection>,
+        serial: u32,
+        connector: &str,
+        value: i32,
+    ) -> Result<()> {
+        proxy.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "SetBacklight",
+            (serial, connector, value),
+        )
+    }
+
+    pub fn set_luminance(
+        proxy: &Proxy<&Connection>,
+        connector: &str,
+        color_mode: ColorMode,
+        luminance: f64,
+    ) -> Result<()> {
+        proxy.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "SetLuminance",
+            (connector, color_mode.raw_value(), luminance),
+        )
+    }
+
+    pub fn reset_luminance(
+        proxy: &Proxy<&Connection>,
+        connector: &str,
+        color_mode: ColorMode,
+    ) -> Result<()> {
+        proxy.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "ResetLuminance",
+            (connector, color_mode.raw_value()),
+        )
     }
 }
 

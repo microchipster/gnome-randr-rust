@@ -11,19 +11,30 @@ pub use proxied_methods::{ApplyConfig, ApplyMonitor};
 // Config properties/comments are sourced from https://github.com/jadahl/gnome-monitor-config/blob/master/src/org.gnome.Mutter.DisplayConfig.xml
 
 /// Current layout mode represents the way logical monitors are layed out on the screen.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
     /// The dimension of a logical monitor is the dimension of the monitor mode, divided by the logical monitor scale.
     Logical,
     /// Each logical monitor has the same dimensions as the monitor modes of the associated monitors assigned to it, no matter what scale is in use.
     Physical,
+    /// Global UI coordinates are logical while monitor geometry remains physical.
+    GlobalUiLogical,
 }
 
 impl LayoutMode {
-    fn from(result: u64) -> LayoutMode {
+    pub fn from_raw(result: u64) -> LayoutMode {
         match result {
             2 => LayoutMode::Physical,
+            3 => LayoutMode::GlobalUiLogical,
             _ => LayoutMode::Logical,
+        }
+    }
+
+    pub const fn raw_value(self) -> u32 {
+        match self {
+            LayoutMode::Logical => 1,
+            LayoutMode::Physical => 2,
+            LayoutMode::GlobalUiLogical => 3,
         }
     }
 }
@@ -36,8 +47,22 @@ impl std::fmt::Display for LayoutMode {
             match self {
                 LayoutMode::Logical => "logical",
                 LayoutMode::Physical => "physical",
+                LayoutMode::GlobalUiLogical => "global-ui-logical",
             }
         )
+    }
+}
+
+impl std::str::FromStr for LayoutMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "logical" => Ok(LayoutMode::Logical),
+            "physical" => Ok(LayoutMode::Physical),
+            "global-ui-logical" => Ok(LayoutMode::GlobalUiLogical),
+            _ => Err(format!("invalid layout mode: {}", value)),
+        }
     }
 }
 
@@ -79,7 +104,7 @@ impl KnownProperties {
                 .get("layout-mode")
                 .map(|val| val.0.as_u64())
                 .flatten()
-                .map_or(LayoutMode::Logical, LayoutMode::from),
+                .map_or(LayoutMode::Logical, LayoutMode::from_raw),
             supports_changing_layout_mode: as_bool("supports-changing-layout-mode")
                 .unwrap_or(false),
             global_scale_required: as_bool("global-scale-required").unwrap_or(false),

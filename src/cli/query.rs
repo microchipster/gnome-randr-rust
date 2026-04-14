@@ -10,8 +10,8 @@ use gnome_randr::{
     display_config::{
         logical_monitor::{LogicalMonitor, Transform},
         physical_monitor::{Mode, PhysicalMonitor},
-        proxied_methods::ColorMode,
-        resources::Resources,
+        proxied_methods::{ColorMode, LuminanceState, NativeDisplayState},
+        resources::{Output, Resources},
         LayoutMode,
     },
     DisplayConfig,
@@ -24,7 +24,7 @@ use super::brightness;
 use super::brightness::{CurrentColor, CurrentColorState};
 use super::common::{format_refresh, format_scale};
 
-const JSON_SCHEMA_VERSION: u32 = 5;
+const JSON_SCHEMA_VERSION: u32 = 6;
 const DISPLAY_PROPERTY_KEYS: [&str; 1] = ["renderer"];
 const MONITOR_PROPERTY_KEYS: [&str; 4] = ["display-name", "is-builtin", "width-mm", "height-mm"];
 
@@ -43,14 +43,14 @@ pub struct CommandOptions {
         short,
         long,
         help = "Show one-line summaries instead of the default sections",
-        long_help = "Show only the condensed text view. With no connector this prints one logical-monitor summary block per active monitor plus per-output enabled state, typed reflection/color-mode state, underscanning visibility, and current software brightness/gamma state. With a connector it prints that logical monitor summary plus the connector's typed monitor state and managed software color state."
+        long_help = "Show only the condensed text view. With no connector this prints one logical-monitor summary block per active monitor plus per-output enabled state, typed reflection/color-mode state, underscanning visibility, native backlight/luminance visibility, and current software brightness/gamma state. With a connector it prints that logical monitor summary plus the connector's typed monitor state and managed software color state."
     )]
     pub summary: bool,
 
     #[structopt(
         long,
         help = "Print structured JSON instead of text",
-        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, typed rotation/reflection fields, physical monitors, typed color-mode and underscanning visibility, software brightness, software gamma, and raw D-Bus property maps for scripts."
+        long_help = "Print structured JSON using the documented schema in README.md. This includes logical monitors, typed rotation/reflection fields, top-level native display state such as power-save and layout-mode capabilities, physical monitors, typed color-mode and underscanning visibility, hardware backlight and luminance state, software brightness, software gamma, and raw D-Bus property maps for scripts."
     )]
     pub json: bool,
 
@@ -92,6 +92,11 @@ struct QueryJson {
     supports_mirroring: bool,
     supports_changing_layout_mode: bool,
     global_scale_required: bool,
+    power_save_mode: String,
+    panel_orientation_managed: bool,
+    apply_monitors_config_allowed: Option<bool>,
+    night_light_supported: Option<bool>,
+    has_external_monitor: Option<bool>,
     renderer: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     properties: PropertyJson,
@@ -135,6 +140,12 @@ struct PhysicalMonitorJson {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     supported_color_modes: Vec<String>,
     is_underscanning: Option<bool>,
+    hardware_backlight_supported: bool,
+    hardware_backlight_active: Option<bool>,
+    hardware_backlight: Option<i64>,
+    hardware_backlight_min_step: Option<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    luminance_preferences: Vec<LuminancePreferenceJson>,
     modes: Vec<ModeJson>,
     software_brightness: SoftwareBrightnessJson,
     software_gamma: SoftwareGammaJson,
@@ -169,6 +180,14 @@ struct SoftwareGammaJson {
     red: Option<f64>,
     green: Option<f64>,
     blue: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct LuminancePreferenceJson {
+    color_mode: String,
+    luminance: f64,
+    default: f64,
+    is_unset: bool,
 }
 
 type SelectedLogicalMonitor<'a> = (usize, &'a LogicalMonitor);
@@ -369,6 +388,56 @@ fn format_supported_color_modes(modes: &[ColorMode]) -> String {
     )
 }
 
+fn resource_output<'a>(resources: &'a Resources, connector: &str) -> Option<&'a Output> {
+    resources
+        .outputs
+        .iter()
+        .find(|output| output.name == connector)
+}
+
+fn nonnegative_output_property(properties: &PropMap, key: &str) -> Option<i64> {
+    property_i64(properties, key).filter(|value| *value >= 0)
+}
+
+fn backlight_connector<'a>(
+    native_state: &'a NativeDisplayState,
+    connector: &str,
+) -> Option<&'a gnome_randr::display_config::proxied_methods::BacklightConnector> {
+    native_state
+        .backlight
+        .as_ref()?
+        .connectors
+        .iter()
+        .find(|entry| entry.connector == connector)
+}
+
+fn luminance_preferences<'a>(
+    native_state: &'a NativeDisplayState,
+    connector: &str,
+) -> Vec<&'a LuminanceState> {
+    native_state
+        .luminance
+        .iter()
+        .filter(|entry| entry.connector == connector)
+        .collect()
+}
+
+fn format_luminance_preferences(entries: &[&LuminanceState]) -> String {
+    format!(
+        "[{}]",
+        entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}={} (default={}, unset={})",
+                    entry.color_mode, entry.luminance, entry.default, entry.is_unset
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(", ")
+    )
+}
+
 fn property_json_value(value: &dyn RefArg) -> Value {
     match value.arg_type() {
         ArgType::Boolean => Value::Bool(value.as_u64().unwrap_or(0) != 0),
@@ -551,6 +620,7 @@ fn write_properties(output: &mut String, indent: usize, properties: &PropertyJso
 fn write_display_section(
     output: &mut String,
     config: &DisplayConfig,
+    native_state: &NativeDisplayState,
     show_properties: bool,
 ) -> fmt::Result {
     writeln!(output, "display:")?;
@@ -575,6 +645,25 @@ fn write_display_section(
         "  global_scale_required: {}",
         config.known_properties.global_scale_required
     )?;
+    writeln!(
+        output,
+        "  power_save_mode: {}",
+        native_state.power_save_mode
+    )?;
+    writeln!(
+        output,
+        "  panel_orientation_managed: {}",
+        native_state.panel_orientation_managed
+    )?;
+    if let Some(value) = native_state.apply_monitors_config_allowed {
+        writeln!(output, "  apply_monitors_config_allowed: {}", value)?;
+    }
+    if let Some(value) = native_state.night_light_supported {
+        writeln!(output, "  night_light_supported: {}", value)?;
+    }
+    if let Some(value) = native_state.has_external_monitor {
+        writeln!(output, "  has_external_monitor: {}", value)?;
+    }
 
     if let Some(renderer) = property_string(&config.properties, "renderer") {
         writeln!(output, "  renderer: {}", renderer)?;
@@ -722,6 +811,8 @@ fn write_verbose_modes(output: &mut String, modes: &[Mode], show_properties: boo
 fn write_monitors<F>(
     output: &mut String,
     config: &DisplayConfig,
+    resources: &Resources,
+    native_state: &NativeDisplayState,
     monitors: &[&PhysicalMonitor],
     color_for: &F,
     verbose: bool,
@@ -783,6 +874,46 @@ where
             property_bool(&monitor.properties, "is-underscanning")
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "null".to_string())
+        )?;
+        let backlight_connector = backlight_connector(native_state, &monitor.connector);
+        let output_properties =
+            resource_output(resources, &monitor.connector).map(|output| &output.properties);
+        let luminance = luminance_preferences(native_state, &monitor.connector);
+        writeln!(
+            output,
+            "    hardware_backlight_supported: {}",
+            backlight_connector.is_some()
+        )?;
+        writeln!(
+            output,
+            "    hardware_backlight_active: {}",
+            backlight_connector
+                .map(|entry| entry.active.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
+        writeln!(
+            output,
+            "    hardware_backlight: {}",
+            output_properties
+                .and_then(|properties| nonnegative_output_property(properties, "backlight"))
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
+        writeln!(
+            output,
+            "    hardware_backlight_min_step: {}",
+            output_properties
+                .and_then(|properties| nonnegative_output_property(
+                    properties,
+                    "min-backlight-step"
+                ))
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
+        writeln!(
+            output,
+            "    luminance_preferences: {}",
+            format_luminance_preferences(&luminance)
         )?;
         if let Some(mode) = current_mode(monitor) {
             writeln!(output, "    current_mode: {}", mode.id)?;
@@ -874,6 +1005,8 @@ fn build_list_monitors(
 fn build_json<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
+    resources: &Resources,
+    native_state: &NativeDisplayState,
     color_for: &F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
@@ -888,6 +1021,11 @@ where
         supports_mirroring: config.known_properties.supports_mirroring,
         supports_changing_layout_mode: config.known_properties.supports_changing_layout_mode,
         global_scale_required: config.known_properties.global_scale_required,
+        power_save_mode: native_state.power_save_mode.to_string(),
+        panel_orientation_managed: native_state.panel_orientation_managed,
+        apply_monitors_config_allowed: native_state.apply_monitors_config_allowed,
+        night_light_supported: native_state.night_light_supported,
+        has_external_monitor: native_state.has_external_monitor,
         renderer: property_string(&config.properties, "renderer"),
         properties: filtered_properties_json(&config.properties, &DISPLAY_PROPERTY_KEYS),
         logical_monitors: selected
@@ -933,6 +1071,32 @@ where
                         .map(|mode| mode.to_string())
                         .collect(),
                     is_underscanning: property_bool(&monitor.properties, "is-underscanning"),
+                    hardware_backlight_supported: backlight_connector(
+                        native_state,
+                        &monitor.connector,
+                    )
+                    .is_some(),
+                    hardware_backlight_active: backlight_connector(
+                        native_state,
+                        &monitor.connector,
+                    )
+                    .map(|entry| entry.active),
+                    hardware_backlight: resource_output(resources, &monitor.connector).and_then(
+                        |output| nonnegative_output_property(&output.properties, "backlight"),
+                    ),
+                    hardware_backlight_min_step: resource_output(resources, &monitor.connector)
+                        .and_then(|output| {
+                            nonnegative_output_property(&output.properties, "min-backlight-step")
+                        }),
+                    luminance_preferences: luminance_preferences(native_state, &monitor.connector)
+                        .into_iter()
+                        .map(|entry| LuminancePreferenceJson {
+                            color_mode: entry.color_mode.to_string(),
+                            luminance: entry.luminance,
+                            default: entry.default,
+                            is_unset: entry.is_unset,
+                        })
+                        .collect(),
                     modes: monitor
                         .modes
                         .iter()
@@ -965,6 +1129,8 @@ where
 fn build_summary_text<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
+    resources: &Resources,
+    native_state: &NativeDisplayState,
     color_for: &F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
@@ -978,14 +1144,22 @@ where
     };
     let format_monitor_summary =
         |monitor: &PhysicalMonitor| -> Result<String, Box<dyn std::error::Error>> {
+            let output = resource_output(resources, &monitor.connector);
+            let luminance = luminance_preferences(native_state, &monitor.connector);
             Ok(format!(
-            "enabled={}, color_mode={}, supported_color_modes={}, is_underscanning={}, software brightness={}, software gamma={}",
+            "enabled={}, color_mode={}, supported_color_modes={}, is_underscanning={}, hardware_backlight_supported={}, hardware_backlight={}, luminance_preferences={}, software brightness={}, software gamma={}",
             monitor_enabled(config, &monitor.connector),
             format_color_mode(color_mode(&monitor.properties)),
             format_supported_color_modes(&supported_color_modes(&monitor.properties)),
             property_bool(&monitor.properties, "is-underscanning")
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "null".to_string()),
+            backlight_connector(native_state, &monitor.connector).is_some(),
+            output
+                .and_then(|output| nonnegative_output_property(&output.properties, "backlight"))
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            format_luminance_preferences(&luminance),
             format_brightness(&monitor.connector)?,
             format_gamma(&monitor.connector)?,
             ))
@@ -1026,6 +1200,8 @@ where
 fn build_structured_text<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
+    resources: &Resources,
+    native_state: &NativeDisplayState,
     color_for: &F,
     verbose: bool,
     show_properties: bool,
@@ -1037,7 +1213,7 @@ where
     let mut output = String::new();
 
     if opts.connector.is_none() || verbose {
-        write_display_section(&mut output, config, show_properties)?;
+        write_display_section(&mut output, config, native_state, show_properties)?;
         output.push('\n');
     }
 
@@ -1054,6 +1230,8 @@ where
     write_monitors(
         &mut output,
         config,
+        resources,
+        native_state,
         &selected.physical_monitors,
         color_for,
         verbose,
@@ -1066,6 +1244,8 @@ where
 fn build_text<F>(
     opts: &CommandOptions,
     config: &DisplayConfig,
+    resources: &Resources,
+    native_state: &NativeDisplayState,
     color_for: &F,
     view: TextView,
 ) -> Result<String, Box<dyn std::error::Error>>
@@ -1073,9 +1253,19 @@ where
     F: Fn(&str) -> Result<CurrentColor, Box<dyn std::error::Error>>,
 {
     match view {
-        TextView::Default => build_structured_text(opts, config, color_for, false, opts.properties),
-        TextView::Summary => build_summary_text(opts, config, color_for),
-        TextView::Verbose => build_structured_text(opts, config, color_for, true, true),
+        TextView::Default => build_structured_text(
+            opts,
+            config,
+            resources,
+            native_state,
+            color_for,
+            false,
+            opts.properties,
+        ),
+        TextView::Summary => build_summary_text(opts, config, resources, native_state, color_for),
+        TextView::Verbose => {
+            build_structured_text(opts, config, resources, native_state, color_for, true, true)
+        }
         TextView::ListMonitors | TextView::ListActiveMonitors => {
             let selected = selected_monitors(opts, config)?;
             build_list_monitors(config, &selected.logical_monitors)
@@ -1090,6 +1280,7 @@ pub fn handle(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let view = validate_options(opts)?;
     let resources = Resources::get_resources(proxy)?;
+    let native_state = DisplayConfig::native_display_state(proxy)?;
 
     let color_for =
         |connector: &str| match brightness::load_current_color(connector, &resources, proxy) {
@@ -1111,8 +1302,10 @@ pub fn handle(
         };
 
     match view {
-        QueryView::Json => build_json(opts, config, &color_for),
-        QueryView::Text(view) => build_text(opts, config, &color_for, view),
+        QueryView::Json => build_json(opts, config, &resources, &native_state, &color_for),
+        QueryView::Text(view) => {
+            build_text(opts, config, &resources, &native_state, &color_for, view)
+        }
     }
 }
 
@@ -1120,10 +1313,14 @@ pub fn handle(
 mod tests {
     use super::{build_json, build_text, validate_options, CommandOptions, QueryView, TextView};
     use crate::cli::brightness::{CurrentColor, CurrentColorState};
-    use gnome_randr::display_config::proxied_methods::{BrightnessFilter, GammaAdjustment};
+    use gnome_randr::display_config::proxied_methods::{
+        BacklightConnector, BacklightState, BrightnessFilter, GammaAdjustment, LuminanceState,
+        NativeDisplayState, PowerSaveMode,
+    };
     use gnome_randr::display_config::{
         logical_monitor::{LogicalMonitor, Monitor, Transform},
         physical_monitor::{KnownModeProperties, Mode, PhysicalMonitor},
+        resources::{Mode as ResourceMode, Output, Resources},
         DisplayConfig, KnownProperties, LayoutMode,
     };
     use serde_json::Value;
@@ -1252,14 +1449,98 @@ mod tests {
         }
     }
 
+    fn sample_resources() -> Resources {
+        let mut output_properties = dbus::arg::PropMap::new();
+        output_properties.insert("backlight".to_string(), dbus::arg::Variant(Box::new(80i32)));
+        output_properties.insert(
+            "min-backlight-step".to_string(),
+            dbus::arg::Variant(Box::new(5i32)),
+        );
+
+        Resources {
+            serial: 9,
+            crtcs: vec![],
+            outputs: vec![
+                Output {
+                    id: 1,
+                    winsys_id: 1,
+                    current_crtc: 1,
+                    possible_crtcs: vec![],
+                    name: "eDP-1".to_string(),
+                    modes: vec![10],
+                    clones: vec![],
+                    properties: output_properties,
+                },
+                Output {
+                    id: 2,
+                    winsys_id: 2,
+                    current_crtc: -1,
+                    possible_crtcs: vec![],
+                    name: "HDMI-1".to_string(),
+                    modes: vec![20],
+                    clones: vec![],
+                    properties: Default::default(),
+                },
+            ],
+            modes: vec![
+                ResourceMode {
+                    id: 10,
+                    winsys_id: 10,
+                    width: 1920,
+                    height: 1080,
+                    frequency: 60.0,
+                    flags: 0,
+                },
+                ResourceMode {
+                    id: 20,
+                    winsys_id: 20,
+                    width: 2560,
+                    height: 1440,
+                    frequency: 60.0,
+                    flags: 0,
+                },
+            ],
+            max_screen_width: 8192,
+            max_screen_height: 8192,
+        }
+    }
+
+    fn sample_native_state() -> NativeDisplayState {
+        NativeDisplayState {
+            power_save_mode: PowerSaveMode::On,
+            panel_orientation_managed: false,
+            apply_monitors_config_allowed: Some(true),
+            night_light_supported: Some(true),
+            has_external_monitor: Some(false),
+            backlight: Some(BacklightState {
+                serial: 9,
+                connectors: vec![BacklightConnector {
+                    connector: "eDP-1".to_string(),
+                    active: true,
+                }],
+            }),
+            luminance: vec![LuminanceState {
+                connector: "eDP-1".to_string(),
+                color_mode: "bt2100".parse().unwrap(),
+                luminance: 100.0,
+                default: 100.0,
+                is_unset: true,
+            }],
+        }
+    }
+
     #[test]
     fn json_output_uses_documented_schema() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_json(
             &CommandOptions {
                 json: true,
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|_connector| {
                 Ok(CurrentColor::managed(
                     1.5,
@@ -1276,7 +1557,12 @@ mod tests {
 
         let value: Value = serde_json::from_str(&output).unwrap();
 
-        assert_eq!(value["schema_version"], 5);
+        assert_eq!(value["schema_version"], 6);
+        assert_eq!(value["power_save_mode"], "on");
+        assert_eq!(value["panel_orientation_managed"], false);
+        assert_eq!(value["apply_monitors_config_allowed"], true);
+        assert_eq!(value["night_light_supported"], true);
+        assert_eq!(value["has_external_monitor"], false);
         assert_eq!(value["renderer"], "native");
         assert_eq!(value["properties"]["compositor-capabilities"][0], "gamma");
         assert_eq!(value["logical_monitors"][0]["rotation"], "normal");
@@ -1292,6 +1578,26 @@ mod tests {
         assert_eq!(value["monitors"][0]["supported_color_modes"][0], "default");
         assert_eq!(value["monitors"][0]["supported_color_modes"][1], "bt2100");
         assert_eq!(value["monitors"][0]["is_underscanning"], false);
+        assert_eq!(value["monitors"][0]["hardware_backlight_supported"], true);
+        assert_eq!(value["monitors"][0]["hardware_backlight_active"], true);
+        assert_eq!(value["monitors"][0]["hardware_backlight"], 80);
+        assert_eq!(value["monitors"][0]["hardware_backlight_min_step"], 5);
+        assert_eq!(
+            value["monitors"][0]["luminance_preferences"][0]["color_mode"],
+            "bt2100"
+        );
+        assert_eq!(
+            value["monitors"][0]["luminance_preferences"][0]["luminance"],
+            100.0
+        );
+        assert_eq!(
+            value["monitors"][0]["luminance_preferences"][0]["default"],
+            100.0
+        );
+        assert_eq!(
+            value["monitors"][0]["luminance_preferences"][0]["is_unset"],
+            true
+        );
         assert_eq!(
             value["monitors"][0]["properties"]["is-underscanning"],
             false
@@ -1321,6 +1627,8 @@ mod tests {
 
     #[test]
     fn json_output_marks_unknown_brightness() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_json(
             &CommandOptions {
                 connector: Some("eDP-1".to_string()),
@@ -1328,6 +1636,8 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|_connector| {
                 Ok(CurrentColor {
                     state: CurrentColorState::Unknown,
@@ -1356,6 +1666,8 @@ mod tests {
 
     #[test]
     fn json_output_keeps_disabled_connector_visible() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_json(
             &CommandOptions {
                 connector: Some("HDMI-1".to_string()),
@@ -1363,6 +1675,8 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|_connector| Ok(CurrentColor::unknown()),
         )
         .unwrap();
@@ -1373,16 +1687,21 @@ mod tests {
         assert_eq!(value["monitors"].as_array().unwrap().len(), 1);
         assert_eq!(value["monitors"][0]["connector"], "HDMI-1");
         assert_eq!(value["monitors"][0]["enabled"], false);
+        assert_eq!(value["monitors"][0]["hardware_backlight_supported"], false);
     }
 
     #[test]
     fn properties_text_includes_raw_property_sections() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_text(
             &CommandOptions {
                 properties: true,
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|_connector| Ok(CurrentColor::identity()),
             TextView::Default,
         )
@@ -1395,10 +1714,14 @@ mod tests {
         assert!(output.contains("color-space: \"srgb\""));
         assert!(output.contains("HDMI-1:"));
         assert!(output.contains("enabled: false"));
+        assert!(output.contains("hardware_backlight_supported: true"));
+        assert!(output.contains("luminance_preferences: [bt2100=100 (default=100, unset=true)]"));
     }
 
     #[test]
     fn verbose_text_uses_json_style_field_names() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_text(
             &CommandOptions {
                 verbose: true,
@@ -1406,6 +1729,8 @@ mod tests {
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|_connector| {
                 Ok(CurrentColor::managed(
                     1.25,
@@ -1422,12 +1747,15 @@ mod tests {
         .unwrap();
 
         assert!(output.contains("display:"));
+        assert!(output.contains("power_save_mode: on"));
         assert!(output.contains("logical monitors:"));
         assert!(output.contains("display_name: Built-in display"));
         assert!(output.contains("reflection: normal"));
         assert!(output.contains("color_mode: bt2100"));
         assert!(output.contains("supported_color_modes: [default, bt2100]"));
         assert!(output.contains("is_underscanning: false"));
+        assert!(output.contains("hardware_backlight_supported: true"));
+        assert!(output.contains("hardware_backlight: 80"));
         assert!(output.contains("software_brightness: 1.25 (gamma)"));
         assert!(output.contains("software_gamma: 1.2:1.1:1"));
         assert!(output.contains("refresh_rate: 60"));
@@ -1436,12 +1764,16 @@ mod tests {
 
     #[test]
     fn disabled_connector_text_query_stays_queryable() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_text(
             &CommandOptions {
                 connector: Some("HDMI-1".to_string()),
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|_connector| Ok(CurrentColor::unknown()),
             TextView::Default,
         )
@@ -1450,18 +1782,23 @@ mod tests {
         assert!(!output.contains("logical monitors:"));
         assert!(output.contains("connector: HDMI-1"));
         assert!(output.contains("enabled: false"));
+        assert!(output.contains("hardware_backlight_supported: false"));
         assert!(output.contains("software_brightness: unknown"));
         assert!(output.contains("software_gamma: unknown"));
     }
 
     #[test]
     fn summary_output_reports_enabled_state() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_text(
             &CommandOptions {
                 summary: true,
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|connector| {
                 if connector == "eDP-1" {
                     Ok(CurrentColor::identity())
@@ -1475,21 +1812,25 @@ mod tests {
 
         assert!(output.contains("outputs:"));
         assert!(output.contains(
-            "eDP-1: enabled=true, color_mode=bt2100, supported_color_modes=[default, bt2100], is_underscanning=false, software brightness=1 (linear), software gamma=1"
+            "eDP-1: enabled=true, color_mode=bt2100, supported_color_modes=[default, bt2100], is_underscanning=false, hardware_backlight_supported=true, hardware_backlight=80, luminance_preferences=[bt2100=100 (default=100, unset=true)], software brightness=1 (linear), software gamma=1"
         ));
         assert!(output.contains(
-            "HDMI-1: enabled=false, color_mode=null, supported_color_modes=[], is_underscanning=null, software brightness=unknown, software gamma=unknown"
+            "HDMI-1: enabled=false, color_mode=null, supported_color_modes=[], is_underscanning=null, hardware_backlight_supported=false, hardware_backlight=null, luminance_preferences=[], software brightness=unknown, software gamma=unknown"
         ));
     }
 
     #[test]
     fn listmonitors_view_matches_xrandr_style_shape() {
+        let resources = sample_resources();
+        let native_state = sample_native_state();
         let output = build_text(
             &CommandOptions {
                 list_monitors: true,
                 ..opts()
             },
             &sample_config(),
+            &resources,
+            &native_state,
             &|_connector| Ok(CurrentColor::identity()),
             TextView::ListMonitors,
         )

@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use dbus::arg::{PropMap, Variant};
+
 use gnome_randr::{
     display_config::{
         physical_monitor::{Mode, PhysicalMonitor},
@@ -12,6 +14,7 @@ use gnome_randr::{
             GammaAdjustment,
         },
         resources::Resources,
+        LayoutMode,
     },
     DisplayConfig,
 };
@@ -21,7 +24,7 @@ use structopt::StructOpt;
 use super::brightness;
 
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 4;
-const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 5;
+const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 6;
 
 #[derive(StructOpt)]
 pub struct CommandOptions {
@@ -263,6 +266,15 @@ struct DesiredSoftwareColor {
 
 fn default_reflection() -> String {
     "normal".to_string()
+}
+
+fn layout_mode_properties(layout_mode: LayoutMode) -> PropMap {
+    let mut properties = PropMap::new();
+    properties.insert(
+        "layout-mode".to_string(),
+        Variant(Box::new(layout_mode.raw_value())),
+    );
+    properties
 }
 
 fn identity_from_parts(vendor: &str, product: &str, serial: &str) -> MonitorIdentity {
@@ -520,18 +532,29 @@ fn build_apply_configs<'a>(
     config: &'a DisplayConfig,
 ) -> Result<
     (
+        Option<LayoutMode>,
         Vec<ApplyConfig<'a>>,
         Vec<(&'a PhysicalMonitor, Option<DesiredSoftwareColor>)>,
     ),
     Error,
 > {
-    let current_layout_mode = config.known_properties.layout_mode.to_string();
-    if profile.layout_mode != current_layout_mode {
+    let profile_layout_mode = profile
+        .layout_mode
+        .parse::<LayoutMode>()
+        .map_err(|message| Error::ParseProfile {
+            path: PathBuf::from("<profile>"),
+            message,
+        })?;
+    let desired_layout_mode = if profile_layout_mode == config.known_properties.layout_mode {
+        None
+    } else if !config.known_properties.supports_changing_layout_mode {
         return Err(Error::UnsupportedLayoutMode {
             profile: profile.layout_mode.clone(),
-            current: current_layout_mode,
+            current: config.known_properties.layout_mode.to_string(),
         });
-    }
+    } else {
+        Some(profile_layout_mode)
+    };
 
     let profile_monitors = profile_monitor_map(profile)?;
     let current_monitors = current_monitor_map(config)?;
@@ -588,14 +611,18 @@ fn build_apply_configs<'a>(
         });
     }
 
-    Ok((configs, software_color))
+    Ok((desired_layout_mode, configs, software_color))
 }
 
 fn print_preview(
+    layout_mode: Option<LayoutMode>,
     configs: &[ApplyConfig<'_>],
     software_color: &[(&PhysicalMonitor, Option<DesiredSoftwareColor>)],
 ) {
     println!("applying saved profile");
+    if let Some(layout_mode) = layout_mode {
+        println!("setting layout mode to {}", layout_mode);
+    }
     for config in configs {
         println!(
             "logical monitor at {},{} scale {} rotation {} reflection {} primary={}",
@@ -660,15 +687,22 @@ pub fn handle(
     proxy: &dbus::blocking::Proxy<&dbus::blocking::Connection>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let profile = parse_profile(&opts.file)?;
-    let (configs, software_color) = build_apply_configs(&profile, config)?;
+    let (layout_mode, configs, software_color) = build_apply_configs(&profile, config)?;
 
     if opts.dry_run {
-        print_preview(&configs, &software_color);
+        print_preview(layout_mode, &configs, &software_color);
         println!("dry run: no changes made.");
         return Ok(());
     }
 
-    config.apply_monitors_config(proxy, configs, opts.persistent)?;
+    config.apply_monitors_config_with_properties(
+        proxy,
+        configs,
+        opts.persistent,
+        layout_mode
+            .map(layout_mode_properties)
+            .unwrap_or_else(PropMap::new),
+    )?;
 
     if software_color.iter().any(|(_, desired)| desired.is_some()) {
         let resources = Resources::get_resources(proxy)?;
@@ -788,7 +822,7 @@ mod tests {
             known_properties: KnownProperties {
                 supports_mirroring: true,
                 layout_mode: LayoutMode::Physical,
-                supports_changing_layout_mode: false,
+                supports_changing_layout_mode: true,
                 global_scale_required: false,
             },
             properties: Default::default(),
@@ -842,8 +876,10 @@ mod tests {
     fn build_apply_configs_matches_monitor_by_identity() {
         let profile = profile();
         let config = display_config();
-        let (configs, software_color) = build_apply_configs(&profile, &config).unwrap();
+        let (layout_mode, configs, software_color) =
+            build_apply_configs(&profile, &config).unwrap();
 
+        assert_eq!(layout_mode, None);
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].x_pos, 100);
         assert_eq!(configs[0].y_pos, 200);
@@ -884,6 +920,15 @@ mod tests {
             }
             error => panic!("unexpected error: {:?}", error),
         }
+    }
+
+    #[test]
+    fn build_apply_configs_allows_layout_mode_change_when_supported() {
+        let mut profile = profile();
+        profile.layout_mode = "logical".to_string();
+
+        let (layout_mode, _, _) = build_apply_configs(&profile, &display_config()).unwrap();
+        assert_eq!(layout_mode, Some(LayoutMode::Logical));
     }
 
     #[test]
