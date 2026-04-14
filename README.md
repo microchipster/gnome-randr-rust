@@ -21,8 +21,8 @@ Shell completions can be generated with `gnome-randr completions bash`, `gnome-r
 
 `gnome-randr` is aiming for `xrandr` capability parity with a more modern Wayland-first CLI, not argument-for-argument syntax parity.
 
-- Implemented: query text/summary/JSON output, `query --verbose`, `query --properties`, `query --listmonitors`, `query --listactivemonitors`, enabled-state reporting for disabled outputs, typed reflection/color-mode/underscanning visibility in query output, mode selection by id or resolution with `--refresh`, `--preferred`, `--auto`, `--primary` / `--noprimary`, real `modify --off`, absolute `modify --position` / `--pos`, relative placement via `--left-of` / `--right-of` / `--above` / `--below`, `modify --same-as` mirroring with local clone preflight, rotation-aware geometry reflow, `modify --reflect`, `modify --color-mode`, scale including the rounded values shown in `query`, rotation, software brightness with filters, software gamma via `modify --gamma`, dynamic shell completions, current software brightness and gamma reporting in `query`, and an internal transactional full-config planner behind `modify`
-- Planned next: saved profiles
+- Implemented: query text/summary/JSON output, `query --verbose`, `query --properties`, `query --listmonitors`, `query --listactivemonitors`, enabled-state reporting for disabled outputs, typed reflection/color-mode/underscanning visibility in query output, mode selection by id or resolution with `--refresh`, `--preferred`, `--auto`, `--primary` / `--noprimary`, real `modify --off`, absolute `modify --position` / `--pos`, relative placement via `--left-of` / `--right-of` / `--above` / `--below`, `modify --same-as` mirroring with local clone preflight, rotation-aware geometry reflow, `modify --reflect`, `modify --color-mode`, scale including the rounded values shown in `query`, rotation, software brightness with filters, software gamma via `modify --gamma`, `apply FILE` using saved `query --json` layouts matched by monitor identity, dynamic shell completions, current software brightness and gamma reporting in `query`, and an internal transactional full-config planner behind `modify`
+- Planned next: Wayland-native backlight, power-save, and layout-mode controls
 - Limited by Mutter: some same-as / partial mirroring layouts, layout-mode changes, and writable monitor properties beyond the documented color-mode surface still depend on what the current `org.gnome.Mutter.DisplayConfig` backend accepts at apply time
 
 ## Mirroring
@@ -49,6 +49,26 @@ Shell completions can be generated with `gnome-randr completions bash`, `gnome-r
 
 See `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md` for the active ordered roadmap.
 
+## Saved Layouts
+
+- `gnome-randr apply FILE` reads a saved layout file generated from `gnome-randr query --json` and applies it as one full transactional monitor config.
+- Matching is based on stable monitor identity (`vendor`, `product`, `serial`), not connector names alone, so the same saved file can still apply if connector names change between boots or docks.
+- The apply path reuses the documented query JSON schema instead of inventing a second config format.
+- Managed software brightness and gamma state from the saved file are restored after the layout apply; `unknown` software color state is intentionally not replayed because it cannot be reproduced faithfully from a query snapshot.
+
+End-to-end example:
+
+```sh
+# save the current layout
+gnome-randr query --json > work-layout.json
+
+# preview how it resolves on current hardware
+gnome-randr apply work-layout.json --dry-run
+
+# apply it for real
+gnome-randr apply work-layout.json
+```
+
 ## Text query views
 
 - `gnome-randr query --listmonitors` prints a concise xrandr-style logical-monitor list.
@@ -59,7 +79,7 @@ See `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md` for the ac
 
 ## JSON output
 
-`gnome-randr query --json` prints a documented machine-readable schema for scripts. `gnome-randr query CONNECTOR --json` uses the same schema, filtered down to the requested connector, even when that connector is currently disabled. `--summary`, `--properties`, `--listmonitors`, and `--listactivemonitors` are text-only views and cannot be combined with `--json`.
+`gnome-randr query --json` prints a documented machine-readable schema for scripts. `gnome-randr query CONNECTOR --json` uses the same schema, filtered down to the requested connector, even when that connector is currently disabled. The same schema can be saved and later restored with `gnome-randr apply FILE`. `--summary`, `--properties`, `--listmonitors`, and `--listactivemonitors` are text-only views and cannot be combined with `--json`.
 
 Schema version `5` currently contains:
 
