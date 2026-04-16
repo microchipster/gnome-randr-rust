@@ -20,6 +20,7 @@ pub trait OrgFreedesktopDBusProperties {
     ) -> Result<(), dbus::Error>;
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct OrgFreedesktopDBusPropertiesPropertiesChanged {
     pub interface_name: String,
@@ -219,6 +220,7 @@ pub trait OrgGnomeMutterDisplayConfig {
     fn panel_orientation_managed(&self) -> Result<bool, dbus::Error>;
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct OrgGnomeMutterDisplayConfigMonitorsChanged {}
 

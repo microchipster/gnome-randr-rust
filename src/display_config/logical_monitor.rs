@@ -42,16 +42,17 @@ impl std::fmt::Display for Monitor {
 }
 
 bitflags! {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Transform: u32 {
     const NORMAL = 0b000;
     const R90 = 0b001;
     const R180 = 0b010;
-    const R270 = Self::R90.bits | Self::R180.bits;
+    const R270 = Self::R90.bits() | Self::R180.bits();
 
     const FLIPPED = 0b100;
-    const F90 = Self::R90.bits | Self::FLIPPED.bits;
-    const F180 = Self::R180.bits | Self::FLIPPED.bits;
-    const F270 = Self::R270.bits | Self::FLIPPED.bits;
+    const F90 = Self::R90.bits() | Self::FLIPPED.bits();
+    const F180 = Self::R180.bits() | Self::FLIPPED.bits();
+    const F270 = Self::R270.bits() | Self::FLIPPED.bits();
 }
 }
 
