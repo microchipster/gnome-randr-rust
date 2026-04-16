@@ -13,7 +13,13 @@ A reimplementation of `xrandr` for Gnome on Wayland, especially for systems that
 
 Installation requires `pkg-config` and `cargo`, part of the Rust toolchain. [Cargo/Rust installation instructions](https://doc.rust-lang.org/cargo/getting-started/installation.html).
 
-To install this tool, run `cargo install gnome-randr`. A library is also exposed for use in other Rust programs.
+To install the published crate, run `cargo install gnome-randr`. To install the current checkout instead, run `cargo install --path .`.
+
+Cargo installs the binary into Cargo's bin directory by default. If you want a custom install location, use `cargo install --root /your/prefix ...` and invoke `/your/prefix/bin/gnome-randr` directly or add that bin directory to your `PATH`.
+
+The installed binary is named `gnome-randr`. If your system already has another `gnome-randr` on `PATH`, use the full path to the one you want or adjust `PATH` ordering explicitly.
+
+A library is also exposed for use in other Rust programs.
 
 Shell completions can be generated with `gnome-randr completions bash`, `gnome-randr completions zsh`, or `gnome-randr completions fish`. These are generated from the current CLI definition at runtime, with dynamic live completions for monitor-dependent values.
 
@@ -63,7 +69,7 @@ Shell completions can be generated with `gnome-randr completions bash`, `gnome-r
 - When brightness and gamma are used together, gnome-randr applies gamma first and brightness/filter second, then stores that combined managed state so repeated absolute changes do not compound while the live LUT still matches the last tool-managed state.
 - If another tool changes the LUT first, the next gnome-randr apply adopts that new LUT as the baseline instead of overwriting it with a lossy reconstructed curve.
 
-See `docs/unaddressed/notes/0000_xrandr_capability_parity_routing.md` for the active ordered roadmap.
+See `docs/addressed/notes/0000_xrandr_capability_parity_routing.md` for the completed parity roadmap.
 
 ## Saved Layouts
 

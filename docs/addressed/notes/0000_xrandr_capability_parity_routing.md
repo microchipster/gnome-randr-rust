@@ -51,3 +51,18 @@ Call this near-parity when `gnome-randr` can reliably do the common real-world m
 - save and restore layouts
 
 The remaining X11-only or backend-mismatched features should be documented explicitly instead of being left ambiguous.
+
+## How This Was Addressed
+
+- this routing note was used to drive the numbered parity track from `0010` through `0130`
+- every follow-up note in that track was either implemented and moved into `docs/addressed/notes/` or explicitly rerouted into a backend-limit note where the current Mutter `DisplayConfig` backend could not represent the feature cleanly
+- once the implementation track was complete, the routing note itself was moved into `docs/addressed/notes/` so `docs/unaddressed/` only reflects genuinely active work
+
+## How To Exercise And Test It
+
+- inspect the completed roadmap summary:
+  - `sed -n '1,120p' docs/addressed/notes/0000_xrandr_capability_parity_routing.md`
+- confirm the active parity track is no longer under `docs/unaddressed/notes/`:
+  - `ls docs/unaddressed/notes`
+- inspect the final backend-limit closeout note that ended the parity track:
+  - `sed -n '1,160p' docs/addressed/notes/0130_document_backend_limits_and_reroute_non_mappable_xrandr_requests.md`
