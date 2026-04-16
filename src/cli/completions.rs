@@ -13,7 +13,7 @@ pub struct CommandOptions {
     #[structopt(
         value_name = "SHELL",
         possible_values = &["bash", "zsh", "fish"],
-        help = "Shell name: bash, zsh, or fish",
+        help = "Shell name bash, zsh, or fish",
         long_help = "Shell name to generate completions for. Valid values are \"bash\", \"zsh\", and \"fish\"."
     )]
     shell: String,
@@ -105,7 +105,11 @@ _gnome-randr() {
     __gnome_randr_static "$@"
 }
 
-_gnome-randr "$@"
+if [[ "${funcstack[1]-}" == "_gnome-randr" || "${funcstack[1]-}" == "_gnome_randr" ]]; then
+    _gnome-randr "$@"
+elif (( $+functions[compdef] )); then
+    compdef _gnome-randr gnome-randr
+fi
 "#,
     );
     script
@@ -157,13 +161,13 @@ mod tests {
     }
 
     #[test]
-    fn zsh_augmentation_preserves_standard_autoload_tail() {
+    fn zsh_augmentation_supports_autoload_and_eval() {
         let script = augment_zsh("_gnome-randr() {\n}\n_gnome-randr \"$@\"\n".to_string());
 
         assert!(script.contains("__gnome_randr_static() {\n}"));
         assert!(script.contains("dynamic_output=$(command gnome-randr __complete \"$PREFIX\" \"${prior_words[@]}\" 2>/dev/null)"));
         assert!(script.contains("if [[ -n $dynamic_output ]]; then"));
-        assert!(script.ends_with("\n_gnome-randr \"$@\"\n"));
-        assert!(!script.contains("compdef _gnome-randr gnome-randr"));
+        assert!(script.contains("if [[ \"${funcstack[1]-}\" == \"_gnome-randr\" || \"${funcstack[1]-}\" == \"_gnome_randr\" ]]; then"));
+        assert!(script.contains("compdef _gnome-randr gnome-randr"));
     }
 }
