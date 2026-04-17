@@ -10,7 +10,7 @@ use gnome_randr::{
     display_config::{
         logical_monitor::{LogicalMonitor, Transform},
         physical_monitor::{Mode, PhysicalMonitor},
-        proxied_methods::{ColorMode, LuminanceState, NativeDisplayState},
+        proxied_methods::{ColorMode, LuminanceState, NativeDisplayState, RgbRange},
         resources::{Output, Resources},
         LayoutMode,
     },
@@ -24,7 +24,7 @@ use super::brightness;
 use super::brightness::{CurrentColor, CurrentColorState};
 use super::common::{format_refresh, format_scale};
 
-const JSON_SCHEMA_VERSION: u32 = 6;
+const JSON_SCHEMA_VERSION: u32 = 8;
 const DISPLAY_PROPERTY_KEYS: [&str; 1] = ["renderer"];
 const MONITOR_PROPERTY_KEYS: [&str; 4] = ["display-name", "is-builtin", "width-mm", "height-mm"];
 
@@ -129,6 +129,7 @@ struct AssociatedMonitorJson {
 struct PhysicalMonitorJson {
     connector: String,
     enabled: bool,
+    is_for_lease: Option<bool>,
     vendor: String,
     product: String,
     serial: String,
@@ -140,6 +141,7 @@ struct PhysicalMonitorJson {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     supported_color_modes: Vec<String>,
     is_underscanning: Option<bool>,
+    rgb_range: Option<String>,
     hardware_backlight_supported: bool,
     hardware_backlight_active: Option<bool>,
     hardware_backlight: Option<i64>,
@@ -351,6 +353,14 @@ fn supported_color_modes(properties: &PropMap) -> Vec<ColorMode> {
         .unwrap_or_default()
 }
 
+fn rgb_range(properties: &PropMap) -> Option<RgbRange> {
+    property_u32(properties, "rgb-range").and_then(RgbRange::from_raw)
+}
+
+fn is_for_lease(properties: &PropMap) -> Option<bool> {
+    property_bool(properties, "is-for-lease")
+}
+
 fn rotation_from_transform(transform: Transform) -> &'static str {
     match transform.bits() & Transform::R270.bits() {
         bits if bits == Transform::R90.bits() => "right",
@@ -386,6 +396,12 @@ fn format_supported_color_modes(modes: &[ColorMode]) -> String {
             .collect::<Vec<String>>()
             .join(", ")
     )
+}
+
+fn format_rgb_range(rgb_range: Option<RgbRange>) -> String {
+    rgb_range
+        .map(|rgb_range| rgb_range.to_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn resource_output<'a>(resources: &'a Resources, connector: &str) -> Option<&'a Output> {
@@ -831,6 +847,13 @@ where
             "    enabled: {}",
             monitor_enabled(config, &monitor.connector)
         )?;
+        writeln!(
+            output,
+            "    is_for_lease: {}",
+            is_for_lease(&monitor.properties)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        )?;
         writeln!(output, "    vendor: {}", monitor.vendor)?;
         writeln!(output, "    product: {}", monitor.product)?;
         writeln!(output, "    serial: {}", monitor.serial)?;
@@ -874,6 +897,11 @@ where
             property_bool(&monitor.properties, "is-underscanning")
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "null".to_string())
+        )?;
+        writeln!(
+            output,
+            "    rgb_range: {}",
+            format_rgb_range(rgb_range(&monitor.properties))
         )?;
         let backlight_connector = backlight_connector(native_state, &monitor.connector);
         let output_properties =
@@ -1058,6 +1086,7 @@ where
                 Ok(PhysicalMonitorJson {
                     connector: monitor.connector.clone(),
                     enabled: monitor_enabled(config, &monitor.connector),
+                    is_for_lease: is_for_lease(&monitor.properties),
                     vendor: monitor.vendor.clone(),
                     product: monitor.product.clone(),
                     serial: monitor.serial.clone(),
@@ -1071,6 +1100,7 @@ where
                         .map(|mode| mode.to_string())
                         .collect(),
                     is_underscanning: property_bool(&monitor.properties, "is-underscanning"),
+                    rgb_range: rgb_range(&monitor.properties).map(|range| range.to_string()),
                     hardware_backlight_supported: backlight_connector(
                         native_state,
                         &monitor.connector,
@@ -1147,13 +1177,17 @@ where
             let output = resource_output(resources, &monitor.connector);
             let luminance = luminance_preferences(native_state, &monitor.connector);
             Ok(format!(
-            "enabled={}, color_mode={}, supported_color_modes={}, is_underscanning={}, hardware_backlight_supported={}, hardware_backlight={}, luminance_preferences={}, software brightness={}, software gamma={}",
+            "enabled={}, is_for_lease={}, color_mode={}, supported_color_modes={}, is_underscanning={}, rgb_range={}, hardware_backlight_supported={}, hardware_backlight={}, luminance_preferences={}, software brightness={}, software gamma={}",
             monitor_enabled(config, &monitor.connector),
+            is_for_lease(&monitor.properties)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string()),
             format_color_mode(color_mode(&monitor.properties)),
             format_supported_color_modes(&supported_color_modes(&monitor.properties)),
             property_bool(&monitor.properties, "is-underscanning")
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "null".to_string()),
+            format_rgb_range(rgb_range(&monitor.properties)),
             backlight_connector(native_state, &monitor.connector).is_some(),
             output
                 .and_then(|output| nonnegative_output_property(&output.properties, "backlight"))
@@ -1347,10 +1381,15 @@ mod tests {
             dbus::arg::Variant(Box::new(false)),
         );
         monitor_properties.insert(
+            "is-for-lease".to_string(),
+            dbus::arg::Variant(Box::new(false)),
+        );
+        monitor_properties.insert(
             "supported-color-modes".to_string(),
-            dbus::arg::Variant(Box::new(vec![0u32, 1u32])),
+            dbus::arg::Variant(Box::new(vec![0u32, 1u32, 2u32])),
         );
         monitor_properties.insert("color-mode".to_string(), dbus::arg::Variant(Box::new(1u32)));
+        monitor_properties.insert("rgb-range".to_string(), dbus::arg::Variant(Box::new(3u32)));
         monitor_properties.insert("width-mm".to_string(), dbus::arg::Variant(Box::new(300i32)));
         monitor_properties.insert(
             "height-mm".to_string(),
@@ -1557,7 +1596,7 @@ mod tests {
 
         let value: Value = serde_json::from_str(&output).unwrap();
 
-        assert_eq!(value["schema_version"], 6);
+        assert_eq!(value["schema_version"], 8);
         assert_eq!(value["power_save_mode"], "on");
         assert_eq!(value["panel_orientation_managed"], false);
         assert_eq!(value["apply_monitors_config_allowed"], true);
@@ -1573,11 +1612,18 @@ mod tests {
         );
         assert_eq!(value["monitors"][0]["connector"], "eDP-1");
         assert_eq!(value["monitors"][0]["enabled"], true);
+        assert_eq!(value["monitors"][0]["is_for_lease"], false);
+        assert_eq!(value["monitors"][0]["is_for_lease"], false);
         assert_eq!(value["monitors"][0]["display_name"], "Built-in display");
         assert_eq!(value["monitors"][0]["color_mode"], "bt2100");
         assert_eq!(value["monitors"][0]["supported_color_modes"][0], "default");
         assert_eq!(value["monitors"][0]["supported_color_modes"][1], "bt2100");
+        assert_eq!(
+            value["monitors"][0]["supported_color_modes"][2],
+            "sdr-native"
+        );
         assert_eq!(value["monitors"][0]["is_underscanning"], false);
+        assert_eq!(value["monitors"][0]["rgb_range"], "limited");
         assert_eq!(value["monitors"][0]["hardware_backlight_supported"], true);
         assert_eq!(value["monitors"][0]["hardware_backlight_active"], true);
         assert_eq!(value["monitors"][0]["hardware_backlight"], 80);
@@ -1623,6 +1669,8 @@ mod tests {
         assert_eq!(value["monitors"][0]["software_gamma"]["blue"], 0.9);
         assert_eq!(value["monitors"][1]["connector"], "HDMI-1");
         assert_eq!(value["monitors"][1]["enabled"], false);
+        assert!(value["monitors"][1]["is_for_lease"].is_null());
+        assert!(value["monitors"][1]["is_for_lease"].is_null());
     }
 
     #[test]
@@ -1709,11 +1757,12 @@ mod tests {
 
         assert!(output.contains("properties:"));
         assert!(output.contains("is-underscanning: false"));
-        assert!(output.contains("supported-color-modes: [0,1]"));
+        assert!(output.contains("supported-color-modes: [0,1,2]"));
         assert!(output.contains("mode_properties[1920x1080@60]:"));
         assert!(output.contains("color-space: \"srgb\""));
         assert!(output.contains("HDMI-1:"));
         assert!(output.contains("enabled: false"));
+        assert!(output.contains("is_for_lease: false"));
         assert!(output.contains("hardware_backlight_supported: true"));
         assert!(output.contains("luminance_preferences: [bt2100=100 (default=100, unset=true)]"));
     }
@@ -1751,9 +1800,11 @@ mod tests {
         assert!(output.contains("logical monitors:"));
         assert!(output.contains("display_name: Built-in display"));
         assert!(output.contains("reflection: normal"));
+        assert!(output.contains("is_for_lease: false"));
         assert!(output.contains("color_mode: bt2100"));
-        assert!(output.contains("supported_color_modes: [default, bt2100]"));
+        assert!(output.contains("supported_color_modes: [default, bt2100, sdr-native]"));
         assert!(output.contains("is_underscanning: false"));
+        assert!(output.contains("rgb_range: limited"));
         assert!(output.contains("hardware_backlight_supported: true"));
         assert!(output.contains("hardware_backlight: 80"));
         assert!(output.contains("software_brightness: 1.25 (gamma)"));
@@ -1782,6 +1833,7 @@ mod tests {
         assert!(!output.contains("logical monitors:"));
         assert!(output.contains("connector: HDMI-1"));
         assert!(output.contains("enabled: false"));
+        assert!(output.contains("is_for_lease: null"));
         assert!(output.contains("hardware_backlight_supported: false"));
         assert!(output.contains("software_brightness: unknown"));
         assert!(output.contains("software_gamma: unknown"));
@@ -1812,10 +1864,10 @@ mod tests {
 
         assert!(output.contains("outputs:"));
         assert!(output.contains(
-            "eDP-1: enabled=true, color_mode=bt2100, supported_color_modes=[default, bt2100], is_underscanning=false, hardware_backlight_supported=true, hardware_backlight=80, luminance_preferences=[bt2100=100 (default=100, unset=true)], software brightness=1 (linear), software gamma=1"
+            "eDP-1: enabled=true, is_for_lease=false, color_mode=bt2100, supported_color_modes=[default, bt2100, sdr-native], is_underscanning=false, rgb_range=limited, hardware_backlight_supported=true, hardware_backlight=80, luminance_preferences=[bt2100=100 (default=100, unset=true)], software brightness=1 (linear), software gamma=1"
         ));
         assert!(output.contains(
-            "HDMI-1: enabled=false, color_mode=null, supported_color_modes=[], is_underscanning=null, hardware_backlight_supported=false, hardware_backlight=null, luminance_preferences=[], software brightness=unknown, software gamma=unknown"
+            "HDMI-1: enabled=false, is_for_lease=null, color_mode=null, supported_color_modes=[], is_underscanning=null, rgb_range=null, hardware_backlight_supported=false, hardware_backlight=null, luminance_preferences=[], software brightness=unknown, software gamma=unknown"
         ));
     }
 

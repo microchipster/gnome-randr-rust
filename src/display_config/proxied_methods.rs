@@ -33,6 +33,12 @@ impl ApplyMonitor<'_> {
                         arg::Variant(Box::new(color_mode.raw_value())),
                     );
                 }
+                ApplyMonitorProperty::RgbRange(rgb_range) => {
+                    properties.insert(
+                        "rgb-range".to_string(),
+                        arg::Variant(Box::new(rgb_range.raw_value())),
+                    );
+                }
             }
         }
 
@@ -43,6 +49,7 @@ impl ApplyMonitor<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyMonitorProperty {
     ColorMode(ColorMode),
+    RgbRange(RgbRange),
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +416,7 @@ impl std::str::FromStr for BrightnessFilter {
 pub enum ColorMode {
     Default,
     Bt2100,
+    SdrNative,
 }
 
 impl ColorMode {
@@ -416,6 +424,7 @@ impl ColorMode {
         match self {
             ColorMode::Default => "default",
             ColorMode::Bt2100 => "bt2100",
+            ColorMode::SdrNative => "sdr-native",
         }
     }
 
@@ -423,6 +432,7 @@ impl ColorMode {
         match self {
             ColorMode::Default => 0,
             ColorMode::Bt2100 => 1,
+            ColorMode::SdrNative => 2,
         }
     }
 
@@ -430,6 +440,7 @@ impl ColorMode {
         match value {
             0 => Some(ColorMode::Default),
             1 => Some(ColorMode::Bt2100),
+            2 => Some(ColorMode::SdrNative),
             _ => None,
         }
     }
@@ -448,7 +459,66 @@ impl std::str::FromStr for ColorMode {
         match value {
             "default" => Ok(ColorMode::Default),
             "bt2100" => Ok(ColorMode::Bt2100),
+            "sdr-native" => Ok(ColorMode::SdrNative),
             _ => Err(format!("invalid color mode: {}", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RgbRange {
+    Unknown,
+    Auto,
+    Full,
+    Limited,
+}
+
+impl RgbRange {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RgbRange::Unknown => "unknown",
+            RgbRange::Auto => "auto",
+            RgbRange::Full => "full",
+            RgbRange::Limited => "limited",
+        }
+    }
+
+    pub const fn raw_value(self) -> u32 {
+        match self {
+            RgbRange::Unknown => 0,
+            RgbRange::Auto => 1,
+            RgbRange::Full => 2,
+            RgbRange::Limited => 3,
+        }
+    }
+
+    pub fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(RgbRange::Unknown),
+            1 => Some(RgbRange::Auto),
+            2 => Some(RgbRange::Full),
+            3 => Some(RgbRange::Limited),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RgbRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for RgbRange {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(RgbRange::Auto),
+            "full" => Ok(RgbRange::Full),
+            "limited" => Ok(RgbRange::Limited),
+            "unknown" => Ok(RgbRange::Unknown),
+            _ => Err(format!("invalid rgb range: {}", value)),
         }
     }
 }

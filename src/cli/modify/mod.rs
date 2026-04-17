@@ -1,11 +1,12 @@
 mod planner;
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::HashSet};
 
 use dbus::arg::{PropMap, Variant};
 
 use gnome_randr::display_config::proxied_methods::{
-    BacklightState, BrightnessFilter, ColorMode, GammaAdjustment, NativeDisplayState, PowerSaveMode,
+    BacklightState, BrightnessFilter, ColorMode, GammaAdjustment, NativeDisplayState,
+    PowerSaveMode, RgbRange,
 };
 use gnome_randr::{
     display_config::{
@@ -28,7 +29,8 @@ use super::{
 use gnome_randr::display_config::logical_monitor::Transform;
 
 const REFLECT_VALUES: &[&str] = &["normal", "x", "y", "xy"];
-const COLOR_MODE_VALUES: &[&str] = &["default", "bt2100"];
+const COLOR_MODE_VALUES: &[&str] = &["default", "bt2100", "sdr-native"];
+const RGB_RANGE_VALUES: &[&str] = &["auto", "full", "limited"];
 const LAYOUT_MODE_VALUES: &[&str] = &["logical", "physical", "global-ui-logical"];
 const POWER_SAVE_VALUES: &[&str] = &["on", "standby", "suspend", "off"];
 
@@ -235,6 +237,14 @@ pub struct ActionOptions {
     pub power_save: Option<PowerSaveMode>,
 
     #[structopt(
+        long = "for-lease-monitor",
+        value_name = "CONNECTOR",
+        help = "Make CONNECTOR available for lease",
+        long_help = "Mark a connector as available for lease using Mutter's top-level monitors-for-lease configuration property. The connector must not remain part of any logical monitor in the applied layout. You can pass this flag more than once."
+    )]
+    pub for_lease_monitor: Vec<String>,
+
+    #[structopt(
         long,
         alias = "pos",
         value_name = "X,Y",
@@ -248,10 +258,20 @@ pub struct ActionOptions {
         value_name = "MODE",
         possible_values = COLOR_MODE_VALUES,
         parse(try_from_str = parse_color_mode),
-        help = "Monitor color mode: default or bt2100",
-        long_help = "Set a known Mutter color mode on this output. Current Mutter/GNOME builds expose color modes such as default and bt2100 when the monitor supports them. This is an explicit Mutter-native property control, not generic xrandr-style property plumbing."
+        help = "Monitor color mode: default, bt2100, or sdr-native",
+        long_help = "Set a known Mutter color mode on this output. Current Mutter/GNOME builds may expose color modes such as default, bt2100, and sdr-native when the monitor supports them. This is an explicit Mutter-native property control, not generic xrandr-style property plumbing."
     )]
     pub color_mode: Option<ColorMode>,
+
+    #[structopt(
+        long = "rgb-range",
+        value_name = "RANGE",
+        possible_values = RGB_RANGE_VALUES,
+        parse(try_from_str = parse_rgb_range),
+        help = "RGB quantization range: auto, full, or limited",
+        long_help = "Set Mutter's typed rgb-range control on this output when the connector exposes it. Valid values are auto, full, and limited. This is an explicit Mutter-native property control, not generic X11 property plumbing."
+    )]
+    pub rgb_range: Option<RgbRange>,
 
     #[structopt(
         long,
@@ -375,8 +395,9 @@ pub struct CommandOptions {
 
     #[structopt(
         long,
+        alias = "verify",
         help = "Preview the requested changes without applying them",
-        long_help = "Preview the requested changes without applying them. This is useful to confirm the resolved connector, off/on state, same-as mirroring target, native layout-mode or power-save change, absolute or relative position, any geometry reflow after rotation or mode changes, preferred/auto/refresh-selected mode, scale, color mode, hardware backlight or luminance change, primary or noprimary state, and software brightness/gamma changes first."
+        long_help = "Preview the requested changes without applying them. This is useful to confirm the resolved connector, off/on state, same-as mirroring target, native layout-mode or power-save change, absolute or relative position, any geometry reflow after rotation or mode changes, preferred/auto/refresh-selected mode, scale, color mode, hardware backlight or luminance change, primary or noprimary state, and software brightness/gamma changes first. --verify is accepted as an alias."
     )]
     dry_run: bool,
 }
@@ -413,6 +434,12 @@ pub enum Error {
         connector: String,
         requested: ColorMode,
         supported: Vec<ColorMode>,
+    },
+    RgbRangeUnsupported {
+        connector: String,
+    },
+    ForLeaseConflict {
+        connector: String,
     },
     LayoutModeUnsupported {
         requested: LayoutMode,
@@ -524,6 +551,16 @@ impl std::fmt::Display for Error {
                     .map(|mode| mode.to_string())
                     .collect::<Vec<String>>()
                     .join(", ")
+            ),
+            Error::RgbRangeUnsupported { connector } => write!(
+                f,
+                "fatal: {} does not expose typed rgb-range control through Mutter.",
+                connector
+            ),
+            Error::ForLeaseConflict { connector } => write!(
+                f,
+                "fatal: {} is marked for lease, so it cannot also be modified as an active output in the same command.",
+                connector
             ),
             Error::LayoutModeUnsupported { requested, current } => write!(
                 f,
@@ -672,6 +709,12 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
             "--off",
             actions.color_mode.is_some(),
             "--color-mode",
+        ),
+        (
+            actions.off,
+            "--off",
+            actions.rgb_range.is_some(),
+            "--rgb-range",
         ),
         (actions.off, "--off", actions.primary, "--primary"),
         (actions.off, "--off", actions.noprimary, "--noprimary"),
@@ -863,6 +906,12 @@ fn validate_actions(actions: &ActionOptions) -> Result<(), Error> {
         (
             actions.same_as.is_some(),
             "--same-as",
+            actions.rgb_range.is_some(),
+            "--rgb-range",
+        ),
+        (
+            actions.same_as.is_some(),
+            "--same-as",
             actions.backlight.is_some(),
             "--backlight",
         ),
@@ -915,6 +964,13 @@ fn parse_color_mode(value: &str) -> Result<ColorMode, String> {
     value.parse()
 }
 
+fn parse_rgb_range(value: &str) -> Result<RgbRange, String> {
+    match value.parse::<RgbRange>()? {
+        RgbRange::Unknown => Err("rgb-range must be auto, full, or limited".to_string()),
+        range => Ok(range),
+    }
+}
+
 fn per_output_actions_requested(actions: &ActionOptions) -> bool {
     actions.rotation.is_some()
         || actions.reflect.is_some()
@@ -927,6 +983,7 @@ fn per_output_actions_requested(actions: &ActionOptions) -> bool {
         || actions.off
         || actions.position.is_some()
         || actions.color_mode.is_some()
+        || actions.rgb_range.is_some()
         || actions.backlight.is_some()
         || actions.luminance.is_some()
         || actions.reset_luminance
@@ -938,6 +995,35 @@ fn per_output_actions_requested(actions: &ActionOptions) -> bool {
         || actions.scale.is_some()
         || actions.brightness.is_some()
         || actions.gamma.is_some()
+}
+
+fn configuration_properties(
+    layout_mode: Option<LayoutMode>,
+    for_lease_monitors: &[&PhysicalMonitor],
+) -> PropMap {
+    let mut properties = layout_mode
+        .map(layout_mode_properties)
+        .unwrap_or_else(PropMap::new);
+
+    if !for_lease_monitors.is_empty() {
+        let monitors = for_lease_monitors
+            .iter()
+            .map(|monitor| {
+                (
+                    monitor.connector.clone(),
+                    monitor.vendor.clone(),
+                    monitor.product.clone(),
+                    monitor.serial.clone(),
+                )
+            })
+            .collect::<Vec<(String, String, String, String)>>();
+        properties.insert(
+            "monitors-for-lease".to_string(),
+            Variant(Box::new(monitors)),
+        );
+    }
+
+    properties
 }
 
 fn rotation_transform(rotation: Rotation) -> u32 {
@@ -1146,6 +1232,33 @@ fn current_color_mode(physical_monitor: &PhysicalMonitor) -> Option<ColorMode> {
         .and_then(|value| ColorMode::from_raw(value as u32))
 }
 
+fn current_rgb_range(physical_monitor: &PhysicalMonitor) -> Option<RgbRange> {
+    physical_monitor
+        .properties
+        .get("rgb-range")
+        .and_then(|value| value.0.as_u64())
+        .and_then(|value| RgbRange::from_raw(value as u32))
+}
+
+fn resolve_rgb_range_request(
+    connector: &str,
+    physical_monitor: &PhysicalMonitor,
+    requested: Option<RgbRange>,
+) -> Result<Option<RgbRange>, Error> {
+    let requested = match requested {
+        Some(requested) => requested,
+        None => return Ok(None),
+    };
+
+    if current_rgb_range(physical_monitor).is_none() {
+        return Err(Error::RgbRangeUnsupported {
+            connector: connector.to_string(),
+        });
+    }
+
+    Ok(Some(requested))
+}
+
 fn resolve_luminance_color_mode(
     connector: &str,
     physical_monitor: &PhysicalMonitor,
@@ -1223,6 +1336,25 @@ fn validate_luminance_request(value: f64) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+fn resolve_for_lease_monitors<'a>(
+    config: &'a DisplayConfig,
+    connectors: &[String],
+) -> Result<Vec<&'a PhysicalMonitor>, Error> {
+    let mut seen = HashSet::new();
+    let mut monitors = Vec::new();
+
+    for connector in connectors {
+        if !seen.insert(connector.clone()) {
+            continue;
+        }
+
+        let monitor = config.physical_monitor(connector).ok_or(Error::NotFound)?;
+        monitors.push(monitor);
+    }
+
+    Ok(monitors)
 }
 
 fn compare_mode_priority(left: &Mode, right: &Mode) -> Ordering {
@@ -1447,6 +1579,7 @@ pub fn handle(
         .unwrap_or(Transform::NORMAL.bits());
     let resolved_layout_mode = resolved_layout_mode(config, opts.actions.layout_mode)?;
     let power_save_mode = opts.actions.power_save;
+    let for_lease_monitors = resolve_for_lease_monitors(config, &opts.actions.for_lease_monitor)?;
     let brightness = opts.actions.brightness;
     let gamma_adjustment = opts.actions.gamma;
     let same_as = opts.actions.same_as.as_deref();
@@ -1514,6 +1647,16 @@ pub fn handle(
             _ => None,
         }
     };
+    let resolved_rgb_range = if opts.actions.off || clone_request.is_some() {
+        None
+    } else {
+        match (physical_monitor, connector.as_deref()) {
+            (Some(physical_monitor), Some(connector)) => {
+                resolve_rgb_range_request(connector, physical_monitor, opts.actions.rgb_range)?
+            }
+            _ => None,
+        }
+    };
     let resolved_backlight = match (
         opts.actions.backlight,
         connector.as_deref(),
@@ -1576,6 +1719,14 @@ pub fn handle(
         _ => None,
     };
     let relative_placement = relative_placement_request(&opts.actions);
+    let connector_marked_for_lease = connector
+        .as_deref()
+        .map(|connector| {
+            for_lease_monitors
+                .iter()
+                .any(|monitor| monitor.connector == connector)
+        })
+        .unwrap_or(false);
     let target_transform = effective_transform(
         current_transform,
         opts.actions.rotation,
@@ -1589,6 +1740,7 @@ pub fn handle(
     let explicit_placement = opts.actions.position.is_some() || relative_placement.is_some();
 
     let has_layout_changes = opts.actions.off
+        || !for_lease_monitors.is_empty()
         || clone_request.is_some()
         || target_transform.is_some()
         || resolved_layout_mode.is_some()
@@ -1598,11 +1750,13 @@ pub fn handle(
         || opts.actions.primary
         || opts.actions.noprimary
         || resolved_scale.is_some()
-        || resolved_color_mode.is_some();
+        || resolved_color_mode.is_some()
+        || resolved_rgb_range.is_some();
 
     if has_layout_changes
         && needs_connector
         && !opts.actions.off
+        && !connector_marked_for_lease
         && clone_request.is_none()
         && !output_enabled
     {
@@ -1615,6 +1769,7 @@ pub fn handle(
     if opts.actions.off
         && needs_connector
         && !output_enabled
+        && !connector_marked_for_lease
         && brightness.is_none()
         && gamma_adjustment.is_none()
         && resolved_backlight.is_none()
@@ -1629,12 +1784,36 @@ pub fn handle(
         && brightness.is_none()
         && gamma_adjustment.is_none()
         && power_save_mode.is_none()
+        && for_lease_monitors.is_empty()
         && resolved_backlight.is_none()
         && opts.actions.luminance.is_none()
         && !opts.actions.reset_luminance
     {
         println!("no changes made.");
         return Ok(());
+    }
+
+    if connector_marked_for_lease
+        && (clone_request.is_some()
+            || target_transform.is_some()
+            || resolved_mode.is_some()
+            || resolved_scale.is_some()
+            || resolved_color_mode.is_some()
+            || resolved_rgb_range.is_some()
+            || opts.actions.position.is_some()
+            || relative_placement.is_some()
+            || opts.actions.primary
+            || opts.actions.noprimary
+            || resolved_backlight.is_some()
+            || opts.actions.luminance.is_some()
+            || opts.actions.reset_luminance
+            || brightness.is_some()
+            || gamma_adjustment.is_some())
+    {
+        return Err(Error::ForLeaseConflict {
+            connector: connector.clone().unwrap(),
+        }
+        .into());
     }
 
     let mut planner = if has_layout_changes {
@@ -1653,8 +1832,25 @@ pub fn handle(
                 println!("setting layout mode to {}", layout_mode);
             }
 
+            for monitor in &for_lease_monitors {
+                println!("marking output {} for lease", monitor.connector);
+                if config
+                    .logical_monitor_for_connector(&monitor.connector)
+                    .is_some()
+                    && !(connector_marked_for_lease
+                        && connector.as_deref() == Some(monitor.connector.as_str())
+                        && opts.actions.off)
+                {
+                    planner
+                        .as_mut()
+                        .unwrap()
+                        .remove_output(&monitor.connector)?;
+                }
+            }
+
             let old_geometry = if connector.is_some()
                 && !opts.actions.off
+                && !connector_marked_for_lease
                 && geometry_changes
                 && !explicit_placement
             {
@@ -1668,7 +1864,7 @@ pub fn handle(
                 None
             };
 
-            if opts.actions.off {
+            if opts.actions.off && !connector_marked_for_lease {
                 println!("disabling output {}", connector.as_deref().unwrap());
                 planner
                     .as_mut()
@@ -1727,6 +1923,14 @@ pub fn handle(
                     .as_mut()
                     .unwrap()
                     .set_color_mode(connector.as_deref().unwrap(), color_mode)?;
+            }
+
+            if let Some(rgb_range) = resolved_rgb_range {
+                println!("setting rgb range to {}", rgb_range);
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .set_rgb_range(connector.as_deref().unwrap(), rgb_range)?;
             }
 
             if let Some(position) = opts.actions.position {
@@ -1832,8 +2036,25 @@ pub fn handle(
             println!("attempting to persist config to disk")
         }
 
+        for monitor in &for_lease_monitors {
+            println!("marking output {} for lease", monitor.connector);
+            if config
+                .logical_monitor_for_connector(&monitor.connector)
+                .is_some()
+                && !(connector_marked_for_lease
+                    && connector.as_deref() == Some(monitor.connector.as_str())
+                    && opts.actions.off)
+            {
+                planner
+                    .as_mut()
+                    .unwrap()
+                    .remove_output(&monitor.connector)?;
+            }
+        }
+
         let old_geometry = if connector.is_some()
             && !opts.actions.off
+            && !connector_marked_for_lease
             && geometry_changes
             && !explicit_placement
         {
@@ -1851,7 +2072,7 @@ pub fn handle(
             println!("setting layout mode to {}", layout_mode);
         }
 
-        if opts.actions.off {
+        if opts.actions.off && !connector_marked_for_lease {
             println!("disabling output {}", connector.as_deref().unwrap());
             planner
                 .as_mut()
@@ -1912,6 +2133,14 @@ pub fn handle(
                 .set_color_mode(connector.as_deref().unwrap(), color_mode)?;
         }
 
+        if let Some(rgb_range) = resolved_rgb_range {
+            println!("setting rgb range to {}", rgb_range);
+            planner
+                .as_mut()
+                .unwrap()
+                .set_rgb_range(connector.as_deref().unwrap(), rgb_range)?;
+        }
+
         if let Some(position) = opts.actions.position {
             println!("setting position to {}", position);
             planner.as_mut().unwrap().set_position(
@@ -1963,9 +2192,7 @@ pub fn handle(
                 .clear_primary(connector.as_deref().unwrap())?;
         }
 
-        let layout_properties = resolved_layout_mode
-            .map(layout_mode_properties)
-            .unwrap_or_else(PropMap::new);
+        let layout_properties = configuration_properties(resolved_layout_mode, &for_lease_monitors);
 
         if let Err(error) = config.apply_monitors_config_with_properties(
             proxy,
@@ -2066,6 +2293,7 @@ mod tests {
             off: false,
             layout_mode: None,
             power_save: None,
+            for_lease_monitor: vec![],
             position: None,
             backlight: None,
             luminance: None,
@@ -2077,6 +2305,7 @@ mod tests {
             below: None,
             scale: None,
             color_mode: None,
+            rgb_range: None,
             brightness: None,
             gamma: None,
             filter: BrightnessFilter::Linear,

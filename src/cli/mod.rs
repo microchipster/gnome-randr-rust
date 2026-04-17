@@ -16,10 +16,12 @@ pub mod query;
 #[derive(StructOpt)]
 enum Command {
     #[structopt(
+        visible_alias = "show",
         about = "List outputs, logical monitors, and properties, or inspect one output by connector."
     )]
     Query(query::CommandOptions),
     #[structopt(
+        visible_alias = "set",
         about = "Change outputs using query values, including native layout-mode, power-save, backlight, luminance, software color, mirroring, and layout controls."
     )]
     Modify(modify::CommandOptions),

@@ -4,7 +4,7 @@ use gnome_randr::{
     display_config::{
         logical_monitor::{LogicalMonitor, Transform},
         physical_monitor::{Mode, PhysicalMonitor},
-        proxied_methods::{ApplyMonitorProperty, ColorMode},
+        proxied_methods::{ApplyMonitorProperty, ColorMode, RgbRange},
         ApplyConfig, ApplyMonitor, LayoutMode,
     },
     DisplayConfig,
@@ -267,6 +267,23 @@ impl<'a> MonitorPlanner<'a> {
         monitor
             .properties
             .push(ApplyMonitorProperty::ColorMode(color_mode));
+        Ok(())
+    }
+
+    pub fn set_rgb_range(&mut self, connector: &str, rgb_range: RgbRange) -> Result<(), Error> {
+        let config = self.target_config_mut(connector)?;
+        let monitor = config
+            .monitors
+            .iter_mut()
+            .find(|monitor| monitor.connector == connector)
+            .ok_or_else(|| Error::ConnectorNotFound(connector.to_string()))?;
+
+        monitor
+            .properties
+            .retain(|property| !matches!(property, ApplyMonitorProperty::RgbRange(_)));
+        monitor
+            .properties
+            .push(ApplyMonitorProperty::RgbRange(rgb_range));
         Ok(())
     }
 

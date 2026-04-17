@@ -13,7 +13,16 @@ const COMPLETE_COMMAND: &str = "__complete";
 const BRIGHTNESS_VALUES: &[&str] = &["0", "0.25", "0.5", "0.75", "1", "1.25", "1.5", "2"];
 const ROTATION_VALUES: &[&str] = &["normal", "left", "right", "inverted"];
 const REFLECTION_VALUES: &[&str] = &["normal", "x", "y", "xy"];
-const COLOR_MODE_VALUES: &[&str] = &["default", "bt2100"];
+const COLOR_MODE_VALUES: &[&str] = &["default", "bt2100", "sdr-native"];
+const RGB_RANGE_VALUES: &[&str] = &["auto", "full", "limited"];
+
+fn normalize_subcommand(subcommand: &str) -> &str {
+    match subcommand {
+        "show" => "query",
+        "set" => "modify",
+        _ => subcommand,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PendingValue {
@@ -28,6 +37,7 @@ enum PendingValue {
     Gamma,
     Filter,
     ColorMode,
+    RgbRange,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +69,7 @@ enum CompletionKind {
     Gamma,
     Filter,
     ColorMode,
+    RgbRange,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -99,6 +110,7 @@ fn filter_current(values: Vec<String>, current: &str) -> Vec<String> {
 }
 
 fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
+    let subcommand = normalize_subcommand(subcommand);
     let mut pending_value = None;
     let mut connector = None;
     let mut mode = None;
@@ -134,13 +146,15 @@ fn parse_context(words: &[String], subcommand: &str) -> ParsedContext {
             | ("modify", "--right-of")
             | ("modify", "--above")
             | ("modify", "--below")
-            | ("modify", "--same-as") => Some(PendingValue::ReferenceConnector),
+            | ("modify", "--same-as")
+            | ("modify", "--for-lease-monitor") => Some(PendingValue::ReferenceConnector),
             ("modify", "--scale") => Some(PendingValue::Scale),
             ("modify", "--refresh") | ("modify", "--rate") => Some(PendingValue::Refresh),
             ("modify", "--brightness") => Some(PendingValue::Brightness),
             ("modify", "--gamma") => Some(PendingValue::Gamma),
             ("modify", "--filter") => Some(PendingValue::Filter),
             ("modify", "--color-mode") => Some(PendingValue::ColorMode),
+            ("modify", "--rgb-range") => Some(PendingValue::RgbRange),
             _ if word.starts_with('-') => None,
             _ => {
                 if connector.is_none() {
@@ -200,8 +214,9 @@ fn connector_completion_requested(context: &ParsedContext, current: &str) -> boo
 
 fn completion_request(words: &[String], current: &str) -> Option<CompletionRequest> {
     let (subcommand, subcommand_words) = words.split_first()?;
+    let subcommand = normalize_subcommand(subcommand);
     let context = parse_context(subcommand_words, subcommand);
-    let dynamic_option = match (subcommand.as_str(), current.split_once('=')) {
+    let dynamic_option = match (subcommand, current.split_once('=')) {
         ("modify", Some(("--rotate", fragment))) => Some((CompletionKind::Rotate, fragment)),
         ("modify", Some(("--reflect", fragment))) => Some((CompletionKind::Reflect, fragment)),
         ("modify", Some(("--mode", fragment))) => Some((
@@ -231,6 +246,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
         ("modify", Some(("--gamma", fragment))) => Some((CompletionKind::Gamma, fragment)),
         ("modify", Some(("--filter", fragment))) => Some((CompletionKind::Filter, fragment)),
         ("modify", Some(("--color-mode", fragment))) => Some((CompletionKind::ColorMode, fragment)),
+        ("modify", Some(("--rgb-range", fragment))) => Some((CompletionKind::RgbRange, fragment)),
         ("modify", Some(("--left-of", fragment)))
         | ("modify", Some(("--right-of", fragment)))
         | ("modify", Some(("--above", fragment)))
@@ -239,6 +255,10 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             CompletionKind::ReferenceConnector {
                 exclude: context.connector.clone(),
             },
+            fragment,
+        )),
+        ("modify", Some(("--for-lease-monitor", fragment))) => Some((
+            CompletionKind::ReferenceConnector { exclude: None },
             fragment,
         )),
         _ => None,
@@ -252,7 +272,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
         });
     }
 
-    let kind = match subcommand.as_str() {
+    let kind = match subcommand {
         "query" => {
             if connector_completion_requested(&context, current) {
                 Some(CompletionKind::Connector)
@@ -280,6 +300,7 @@ fn completion_request(words: &[String], current: &str) -> Option<CompletionReque
             Some(PendingValue::Gamma) => Some(CompletionKind::Gamma),
             Some(PendingValue::Filter) => Some(CompletionKind::Filter),
             Some(PendingValue::ColorMode) => Some(CompletionKind::ColorMode),
+            Some(PendingValue::RgbRange) => Some(CompletionKind::RgbRange),
             _ => {
                 if connector_completion_requested(&context, current) {
                     Some(CompletionKind::Connector)
@@ -354,6 +375,9 @@ fn completion_values(kind: CompletionKind, config: &DisplayConfig, current: &str
         }
         CompletionKind::ColorMode => {
             values.extend(COLOR_MODE_VALUES.iter().map(|value| value.to_string()));
+        }
+        CompletionKind::RgbRange => {
+            values.extend(RGB_RANGE_VALUES.iter().map(|value| value.to_string()));
         }
     }
 
@@ -436,6 +460,13 @@ pub fn try_handle(args: &[OsString]) -> Result<bool, Box<dyn std::error::Error>>
                 ),
                 CompletionKind::ColorMode => filter_current(
                     COLOR_MODE_VALUES
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                    &request.current,
+                ),
+                CompletionKind::RgbRange => filter_current(
+                    RGB_RANGE_VALUES
                         .iter()
                         .map(|value| value.to_string())
                         .collect(),
@@ -524,6 +555,15 @@ mod tests {
                 kind: CompletionKind::ReferenceConnector {
                     exclude: Some("eDP-1".to_string()),
                 },
+                current: String::new(),
+                prefix: String::new(),
+            })
+        );
+
+        assert_eq!(
+            completion_request(&words(&["modify", "--for-lease-monitor"]), ""),
+            Some(CompletionRequest {
+                kind: CompletionKind::ReferenceConnector { exclude: None },
                 current: String::new(),
                 prefix: String::new(),
             })
@@ -675,6 +715,38 @@ mod tests {
                 },
                 current: "h".to_string(),
                 prefix: "--same-as=".to_string(),
+            })
+        );
+
+        assert_eq!(
+            completion_request(&words(&["modify"]), "--for-lease-monitor=e"),
+            Some(CompletionRequest {
+                kind: CompletionKind::ReferenceConnector { exclude: None },
+                current: "e".to_string(),
+                prefix: "--for-lease-monitor=".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn aliases_use_same_dynamic_completion_logic() {
+        assert_eq!(
+            completion_request(&words(&["show", "--summary"]), "e"),
+            Some(CompletionRequest {
+                kind: CompletionKind::Connector,
+                current: "e".to_string(),
+                prefix: String::new(),
+            })
+        );
+
+        assert_eq!(
+            completion_request(&words(&["set", "eDP-1", "--same-as"]), ""),
+            Some(CompletionRequest {
+                kind: CompletionKind::ReferenceConnector {
+                    exclude: Some("eDP-1".to_string()),
+                },
+                current: String::new(),
+                prefix: String::new(),
             })
         );
     }

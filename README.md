@@ -6,11 +6,6 @@
 It targets capability parity with the useful parts of `xrandr`, not argument
 compatibility with RandR.
 
-> [!NOTE]
-> The original author is not actively maintaining this project.
-> On GNOME 48+, also consider
-> [`gdctl`](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/doc/man/gdctl.rst).
-
 ## Install
 
 Requirements:
@@ -61,6 +56,7 @@ gnome-randr completions fish
 Completed roadmap:
 
 - `docs/addressed/notes/0000_xrandr_capability_parity_routing.md`
+- `docs/addressed/notes/0000_align_native_surface_with_gdctl_routing.md`
 
 ## Common Commands
 
@@ -146,9 +142,22 @@ gnome-randr modify eDP-1 --color-mode bt2100
 - `reflection`
 - `color_mode`
 - `supported_color_modes`
+- `is_for_lease`
 - `is_underscanning`
 
 `query --properties` still exposes the raw property maps.
+
+## Leasing
+
+`gnome-randr` supports Mutter's typed monitor leasing surface.
+
+```sh
+gnome-randr modify --for-lease-monitor DP-2 --dry-run
+```
+
+- leased monitors are removed from any active logical monitor in the applied config
+- leasing is sent through the top-level `monitors-for-lease` property in `ApplyMonitorsConfig`
+- `query` and `query --json` expose typed `is_for_lease`
 
 ## Saved Layouts
 
@@ -165,7 +174,7 @@ name alone.
 
 ## JSON Output
 
-Current schema version: `6`.
+Current schema version: `8`.
 
 Top-level structure:
 
@@ -176,8 +185,7 @@ Top-level structure:
 `logical_monitors` include geometry, typed rotation/reflection, primary flag,
 and attached monitor identities.
 
-`monitors` include identity, enabled state, modes, typed monitor properties,
-native backlight/luminance state, and software color state.
+`monitors` include identity, enabled state, typed lease state, modes, typed monitor properties, native backlight/luminance state, and software color state.
 
 Examples:
 
@@ -190,7 +198,7 @@ gnome-randr query eDP-1 --json | jq '.monitors[0] | {software_brightness, softwa
 
 # typed reflection and monitor properties
 gnome-randr query --json | jq '.logical_monitors[] | {rotation, reflection, monitors}'
-gnome-randr query --json | jq '.monitors[] | {connector, color_mode, supported_color_modes, is_underscanning}'
+gnome-randr query --json | jq '.monitors[] | {connector, color_mode, supported_color_modes, is_for_lease, is_underscanning}'
 
 # native backlight and luminance
 gnome-randr query --json | jq '.monitors[] | {connector, hardware_backlight_supported, hardware_backlight, luminance_preferences}'
@@ -226,3 +234,32 @@ The CLI uses `org.gnome.Mutter.DisplayConfig` over D-Bus.
 
 - `xrandr`
 - [`gnome-randr`](https://gitlab.com/Oschowa/gnome-randr/)
+
+## Alignment With `gdctl`
+
+[`gdctl`](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/doc/man/gdctl.rst)
+is the upstream Mutter CLI for the same `org.gnome.Mutter.DisplayConfig`
+backend. `gnome-randr` now uses it as the native reference for terminology,
+enums, capability boundaries, and backend expectations.
+
+Native surface aligned with `gdctl`:
+
+- `show` / `set` / `--verify` aliases for `query` / `modify` / `--dry-run`
+- layout mode, placement, same-as mirroring, rotation, reflection, mode,
+  scale, and primary controls
+- typed monitor properties such as `color-mode`, `rgb-range`, and
+  `for-lease-monitor`
+- native power-save, backlight, and luminance controls
+
+Intentional differences:
+
+- `gnome-randr` keeps the higher-level `query` / `modify` / `apply FILE` model
+  instead of cloning `gdctl` syntax wholesale
+- `query --json`, software brightness/gamma, saved layout restore, and shell
+  completions are higher-level features beyond `gdctl`
+- aliases are additive only where semantics actually match cleanly
+
+Reference notes:
+
+- `docs/addressed/notes/0000_align_native_surface_with_gdctl_routing.md`
+- `docs/addressed/notes/0010_publish_gdctl_compatibility_matrix_and_divergence_policy.md`

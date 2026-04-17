@@ -11,7 +11,7 @@ use gnome_randr::{
         physical_monitor::{Mode, PhysicalMonitor},
         proxied_methods::{
             ApplyConfig, ApplyMonitor, ApplyMonitorProperty, BrightnessFilter, ColorMode,
-            GammaAdjustment,
+            GammaAdjustment, RgbRange,
         },
         resources::Resources,
         LayoutMode,
@@ -24,7 +24,7 @@ use structopt::StructOpt;
 use super::brightness;
 
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 4;
-const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 6;
+const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 8;
 
 #[derive(StructOpt)]
 pub struct CommandOptions {
@@ -39,8 +39,9 @@ pub struct CommandOptions {
 
     #[structopt(
         long,
+        alias = "verify",
         help = "Preview the profile without applying it",
-        long_help = "Preview the profile without applying it. This validates the JSON schema, resolves hardware by vendor/product/serial identity, matches modes on current hardware, and shows the software color state that would be restored."
+        long_help = "Preview the profile without applying it. This validates the JSON schema, resolves hardware by vendor/product/serial identity, matches modes on current hardware, and shows the software color state that would be restored. --verify is accepted as an alias."
     )]
     dry_run: bool,
 }
@@ -74,11 +75,13 @@ enum Error {
     InvalidRotation(String),
     InvalidReflection(String),
     InvalidColorMode(String),
+    InvalidRgbRange(String),
     ColorModeUnavailable {
         identity: MonitorIdentity,
         requested: ColorMode,
         supported: Vec<ColorMode>,
     },
+    RgbRangeUnsupported(MonitorIdentity),
 }
 
 impl std::fmt::Display for Error {
@@ -156,6 +159,9 @@ impl std::fmt::Display for Error {
             Error::InvalidColorMode(value) => {
                 write!(f, "fatal: profile uses unsupported color mode {}.", value)
             }
+            Error::InvalidRgbRange(value) => {
+                write!(f, "fatal: profile uses unsupported rgb_range {}.", value)
+            }
             Error::ColorModeUnavailable {
                 identity,
                 requested,
@@ -170,6 +176,11 @@ impl std::fmt::Display for Error {
                     .map(|mode| mode.to_string())
                     .collect::<Vec<String>>()
                     .join(", ")
+            ),
+            Error::RgbRangeUnsupported(identity) => write!(
+                f,
+                "fatal: {} does not expose typed rgb-range control on current hardware.",
+                identity
             ),
         }
     }
@@ -224,10 +235,12 @@ struct ProfileMonitor {
     #[allow(dead_code)]
     connector: String,
     enabled: bool,
+    is_for_lease: Option<bool>,
     vendor: String,
     product: String,
     serial: String,
     color_mode: Option<String>,
+    rgb_range: Option<String>,
     modes: Vec<ProfileMode>,
     software_brightness: Option<ProfileSoftwareBrightness>,
     software_gamma: Option<ProfileSoftwareGamma>,
@@ -274,6 +287,35 @@ fn layout_mode_properties(layout_mode: LayoutMode) -> PropMap {
         "layout-mode".to_string(),
         Variant(Box::new(layout_mode.raw_value())),
     );
+    properties
+}
+
+fn configuration_properties(
+    layout_mode: Option<LayoutMode>,
+    monitors_for_lease: &[&PhysicalMonitor],
+) -> PropMap {
+    let mut properties = layout_mode
+        .map(layout_mode_properties)
+        .unwrap_or_else(PropMap::new);
+
+    if !monitors_for_lease.is_empty() {
+        let monitors = monitors_for_lease
+            .iter()
+            .map(|monitor| {
+                (
+                    monitor.connector.clone(),
+                    monitor.vendor.clone(),
+                    monitor.product.clone(),
+                    monitor.serial.clone(),
+                )
+            })
+            .collect::<Vec<(String, String, String, String)>>();
+        properties.insert(
+            "monitors-for-lease".to_string(),
+            Variant(Box::new(monitors)),
+        );
+    }
+
     properties
 }
 
@@ -487,6 +529,32 @@ fn resolve_color_mode(
     }
 }
 
+fn resolve_rgb_range(
+    profile_monitor: &ProfileMonitor,
+    current_monitor: &PhysicalMonitor,
+    identity: &MonitorIdentity,
+) -> Result<Option<RgbRange>, Error> {
+    let requested = match &profile_monitor.rgb_range {
+        Some(value) => Some(
+            value
+                .parse::<RgbRange>()
+                .map_err(|_| Error::InvalidRgbRange(value.clone()))?,
+        ),
+        None => property_u32(&current_monitor.properties, "rgb-range").and_then(RgbRange::from_raw),
+    };
+
+    match requested {
+        Some(RgbRange::Unknown) | None => Ok(None),
+        Some(requested) => {
+            if property_u32(&current_monitor.properties, "rgb-range").is_none() {
+                Err(Error::RgbRangeUnsupported(identity.clone()))
+            } else {
+                Ok(Some(requested))
+            }
+        }
+    }
+}
+
 fn desired_software_color(
     profile_monitor: &ProfileMonitor,
 ) -> Result<Option<DesiredSoftwareColor>, Error> {
@@ -535,6 +603,7 @@ fn build_apply_configs<'a>(
         Option<LayoutMode>,
         Vec<ApplyConfig<'a>>,
         Vec<(&'a PhysicalMonitor, Option<DesiredSoftwareColor>)>,
+        Vec<&'a PhysicalMonitor>,
     ),
     Error,
 > {
@@ -561,6 +630,7 @@ fn build_apply_configs<'a>(
     let mut used_identities = HashSet::new();
     let mut configs = Vec::new();
     let mut software_color = Vec::new();
+    let mut monitors_for_lease = Vec::new();
 
     for logical_monitor in &profile.logical_monitors {
         let mut monitors = Vec::new();
@@ -589,6 +659,10 @@ fn build_apply_configs<'a>(
             {
                 properties.push(ApplyMonitorProperty::ColorMode(color_mode));
             }
+            if let Some(rgb_range) = resolve_rgb_range(profile_monitor, current_monitor, &identity)?
+            {
+                properties.push(ApplyMonitorProperty::RgbRange(rgb_range));
+            }
 
             monitors.push(ApplyMonitor {
                 connector: &current_monitor.connector,
@@ -611,13 +685,37 @@ fn build_apply_configs<'a>(
         });
     }
 
-    Ok((desired_layout_mode, configs, software_color))
+    for profile_monitor in &profile.monitors {
+        if !profile_monitor.is_for_lease.unwrap_or(false) {
+            continue;
+        }
+
+        let identity = profile_identity(profile_monitor);
+        let current_monitor = current_monitors
+            .get(&identity)
+            .copied()
+            .ok_or_else(|| Error::MissingCurrentMonitor(identity.clone()))?;
+
+        if used_identities.contains(&identity) {
+            return Err(Error::DuplicateActiveMonitor(identity));
+        }
+
+        monitors_for_lease.push(current_monitor);
+    }
+
+    Ok((
+        desired_layout_mode,
+        configs,
+        software_color,
+        monitors_for_lease,
+    ))
 }
 
 fn print_preview(
     layout_mode: Option<LayoutMode>,
     configs: &[ApplyConfig<'_>],
     software_color: &[(&PhysicalMonitor, Option<DesiredSoftwareColor>)],
+    monitors_for_lease: &[&PhysicalMonitor],
 ) {
     println!("applying saved profile");
     if let Some(layout_mode) = layout_mode {
@@ -639,16 +737,36 @@ fn print_preview(
                 .iter()
                 .find_map(|property| match property {
                     ApplyMonitorProperty::ColorMode(color_mode) => Some(color_mode.to_string()),
+                    _ => None,
+                });
+            let rgb_range = monitor
+                .properties
+                .iter()
+                .find_map(|property| match property {
+                    ApplyMonitorProperty::RgbRange(rgb_range) => Some(rgb_range.to_string()),
+                    _ => None,
                 });
 
-            match color_mode {
-                Some(color_mode) => println!(
+            match (color_mode, rgb_range) {
+                (Some(color_mode), Some(rgb_range)) => println!(
+                    "  {} mode {} color_mode {} rgb_range {}",
+                    monitor.connector, monitor.mode_id, color_mode, rgb_range
+                ),
+                (Some(color_mode), None) => println!(
                     "  {} mode {} color_mode {}",
                     monitor.connector, monitor.mode_id, color_mode
                 ),
-                None => println!("  {} mode {}", monitor.connector, monitor.mode_id),
+                (None, Some(rgb_range)) => println!(
+                    "  {} mode {} rgb_range {}",
+                    monitor.connector, monitor.mode_id, rgb_range
+                ),
+                (None, None) => println!("  {} mode {}", monitor.connector, monitor.mode_id),
             }
         }
+    }
+
+    for monitor in monitors_for_lease {
+        println!("marking output {} for lease", monitor.connector);
     }
 
     for (monitor, desired) in software_color {
@@ -687,10 +805,11 @@ pub fn handle(
     proxy: &dbus::blocking::Proxy<&dbus::blocking::Connection>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let profile = parse_profile(&opts.file)?;
-    let (layout_mode, configs, software_color) = build_apply_configs(&profile, config)?;
+    let (layout_mode, configs, software_color, monitors_for_lease) =
+        build_apply_configs(&profile, config)?;
 
     if opts.dry_run {
-        print_preview(layout_mode, &configs, &software_color);
+        print_preview(layout_mode, &configs, &software_color, &monitors_for_lease);
         println!("dry run: no changes made.");
         return Ok(());
     }
@@ -699,9 +818,7 @@ pub fn handle(
         proxy,
         configs,
         opts.persistent,
-        layout_mode
-            .map(layout_mode_properties)
-            .unwrap_or_else(PropMap::new),
+        configuration_properties(layout_mode, &monitors_for_lease),
     )?;
 
     if software_color.iter().any(|(_, desired)| desired.is_some()) {
@@ -728,7 +845,9 @@ pub fn handle(
 mod tests {
     use std::fs;
 
-    use super::{build_apply_configs, parse_profile, ColorMode, Error, Profile};
+    use super::{
+        build_apply_configs, parse_profile, ColorMode, Error, Profile, ProfileMode, ProfileMonitor,
+    };
     use gnome_randr::{
         display_config::{
             logical_monitor::{LogicalMonitor, Monitor, Transform},
@@ -742,9 +861,10 @@ mod tests {
         let mut hdmi_props = dbus::arg::PropMap::new();
         hdmi_props.insert(
             "supported-color-modes".to_string(),
-            dbus::arg::Variant(Box::new(vec![0u32, 1u32])),
+            dbus::arg::Variant(Box::new(vec![0u32, 1u32, 2u32])),
         );
         hdmi_props.insert("color-mode".to_string(), dbus::arg::Variant(Box::new(1u32)));
+        hdmi_props.insert("rgb-range".to_string(), dbus::arg::Variant(Box::new(3u32)));
 
         DisplayConfig {
             serial: 1,
@@ -832,7 +952,7 @@ mod tests {
     fn profile() -> Profile {
         serde_json::from_str(
             r#"{
-                "schema_version": 5,
+                "schema_version": 7,
                 "layout_mode": "physical",
                 "logical_monitors": [
                     {
@@ -859,7 +979,8 @@ mod tests {
                         "vendor": "Dell",
                         "product": "U2720Q",
                         "serial": "123",
-                        "color_mode": "bt2100",
+                        "color_mode": "sdr-native",
+                        "rgb_range": "limited",
                         "modes": [
                             {"id": "2560x1440@59.94", "width": 2560, "height": 1440, "refresh_rate": 59.94, "is_current": true}
                         ],
@@ -876,16 +997,18 @@ mod tests {
     fn build_apply_configs_matches_monitor_by_identity() {
         let profile = profile();
         let config = display_config();
-        let (layout_mode, configs, software_color) =
+        let (layout_mode, configs, software_color, monitors_for_lease) =
             build_apply_configs(&profile, &config).unwrap();
 
         assert_eq!(layout_mode, None);
+        assert!(monitors_for_lease.is_empty());
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].x_pos, 100);
         assert_eq!(configs[0].y_pos, 200);
         assert_eq!(configs[0].transform, 6);
         assert_eq!(configs[0].monitors[0].connector, "HDMI-9");
         assert_eq!(configs[0].monitors[0].mode_id, "2560x1440@59.94");
+        assert_eq!(configs[0].monitors[0].properties.len(), 2);
         assert_eq!(software_color.len(), 1);
     }
 
@@ -915,7 +1038,7 @@ mod tests {
                 supported,
                 ..
             } => {
-                assert_eq!(requested, ColorMode::Bt2100);
+                assert_eq!(requested, ColorMode::SdrNative);
                 assert_eq!(supported, vec![ColorMode::Default]);
             }
             error => panic!("unexpected error: {:?}", error),
@@ -923,12 +1046,57 @@ mod tests {
     }
 
     #[test]
+    fn build_apply_configs_validates_rgb_range_support() {
+        let mut config = display_config();
+        config.monitors[0].properties.remove("rgb-range");
+
+        match build_apply_configs(&profile(), &config).unwrap_err() {
+            Error::RgbRangeUnsupported(identity) => assert_eq!(identity.serial, "123"),
+            error => panic!("unexpected error: {:?}", error),
+        }
+    }
+
+    #[test]
+    fn build_apply_configs_collects_monitors_for_lease() {
+        let mut profile = profile();
+        profile.monitors.push(ProfileMonitor {
+            connector: "eDP-1".to_string(),
+            enabled: false,
+            vendor: "BOE".to_string(),
+            product: "Panel".to_string(),
+            serial: "abc".to_string(),
+            color_mode: None,
+            rgb_range: None,
+            is_for_lease: Some(true),
+            modes: vec![ProfileMode {
+                id: "1920x1080@60".to_string(),
+                width: 1920,
+                height: 1080,
+                refresh_rate: 60.0,
+                is_current: true,
+            }],
+            software_brightness: None,
+            software_gamma: None,
+        });
+
+        let config = display_config();
+        let (_layout_mode, _configs, _software_color, monitors_for_lease) =
+            build_apply_configs(&profile, &config).unwrap();
+
+        assert_eq!(monitors_for_lease.len(), 1);
+        assert_eq!(monitors_for_lease[0].connector, "eDP-1");
+    }
+
+    #[test]
     fn build_apply_configs_allows_layout_mode_change_when_supported() {
         let mut profile = profile();
         profile.layout_mode = "logical".to_string();
+        let config = display_config();
 
-        let (layout_mode, _, _) = build_apply_configs(&profile, &display_config()).unwrap();
+        let (layout_mode, _, _, monitors_for_lease) =
+            build_apply_configs(&profile, &config).unwrap();
         assert_eq!(layout_mode, Some(LayoutMode::Logical));
+        assert!(monitors_for_lease.is_empty());
     }
 
     #[test]

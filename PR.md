@@ -2,44 +2,51 @@
 
 ## Summary
 
-- add xrandr-style software brightness to `modify`, with `query` reporting the current managed brightness/filter state
-- preserve existing gamma/color-correction state by scaling the current CRTC gamma LUT directly instead of reconstructing a simplified curve
-- make `modify` default to the only connected output when there is exactly one monitor
-- generate bash, zsh, and fish completions from the real CLI definition, with dynamic monitor-aware value completion
-- tighten CLI help text and internal display-config plumbing needed for gamma/resource access
+- bring `gnome-randr` to practical xrandr capability parity on GNOME Wayland, then align the native control surface and semantics with upstream `gdctl`
+- add full typed support for modern Mutter display controls: layout planning, mirroring, reflection, color mode, rgb range, native power/backlight/luminance, software color, and saved layout restore
+- document the completed parity and gdctl-alignment workstreams, archive addressed backlog items, and tighten the maintainer/user docs around the final model
 
 ## Details
 
-### Software brightness
+### Query And JSON Surface
 
-- add `gnome-randr modify [CONNECTOR] --brightness <factor> [--filter <linear|gamma|filmic>]` with `--dry-run`
-- read the current CRTC gamma ramp from Mutter, scale each LUT entry channel-by-channel, and write the scaled ramp back
-- store per-output brightness state so repeated `--brightness N` calls are absolute relative to the saved baseline instead of compounding
-- detect when some other component changed the gamma ramp and treat the current LUT as the new baseline so Night Light / ICC / other color correction stays intact
-- let `query` surface the current brightness/filter when the live gamma ramp matches a managed state, otherwise report it as unknown
-- add unit coverage for LUT scaling, clamping, brightness state round-tripping, and baseline reuse
+- expand `query` into a typed inspection interface with text, summary, verbose, properties, listmonitors/listactivemonitors, and JSON modes
+- evolve the JSON schema through versions `1` to `8`, adding typed software color state, reflection, color mode, rgb range, native backlight/luminance, power-save, lease state, and layout metadata while preserving file-based restore compatibility
+- keep disabled outputs queryable by connector and expose stable hardware identity (`vendor`, `product`, `serial`) for later restore/apply flows
 
-### CLI ergonomics
+### Layout And Output Control
 
-- add shared connector resolution logic with a single-output default and clearer error messages when multiple outputs exist
-- update `query`, `modify`, and `completions` help text to show valid values and examples without being verbose
-- add explicit `possible_values`/value names for shell-visible options like rotation and completion shell selection
+- move output mutation under one coherent `modify` command with single-output defaulting when exactly one connector exists
+- add mode selection by id or resolution, refresh selection, preferred/auto, scale matching against rounded query values, primary/noprimary, output disable, absolute placement, relative placement, same-as mirroring, reflection, color mode, rgb range, leasing, native power-save, backlight, luminance, and layout-mode changes
+- replace ad hoc one-output application with a transactional planner over full `ApplyMonitorsConfig` payloads, including geometry-aware reflow and clone-group handling
+- support top-level `ApplyMonitorsConfig` properties such as `layout-mode` and `monitors-for-lease`
 
-### Shell completions
+### Software Color
 
-- add `gnome-randr completions <bash|zsh|fish>`
-- generate the static completion tree from the actual `StructOpt`/`clap` app so completions stay in sync with the CLI
-- add an internal `__complete` helper for live values that depend on current display state
-- provide dynamic completion for connectors, modes, scales, brightness presets, filter values, rotation values, and `--option=value` forms
-- avoid opening D-Bus when just generating completion scripts
+- implement exact LUT-based software brightness with `linear`, `gamma`, and `filmic` filters
+- preserve Night Light / ICC / external LUT state by adopting the live LUT as the baseline when it no longer matches the last managed state
+- extend the same preserved-LUT pipeline to typed per-channel software gamma (`--gamma R[:G:B]`) with xrandr-compatible semantics
+- surface both `software_brightness` and `software_gamma` in query text and JSON, and restore them after `apply FILE` when the saved state is reproducible
 
-### Display-config plumbing and cleanup
+### Saved Layout Restore
 
-- restore Mutter `GetResources` parsing with typed `Resources`, `Crtc`, `Output`, and `Mode` models
-- add `Resources::{get_resources,get_crtc_gamma,set_crtc_gamma}` and a reusable `Gamma` type
-- make `LogicalMonitor` clonable where config application paths need owned copies
-- suppress dead-code warnings only on unused autogenerated D-Bus traits so `cargo install --path .` stays clean
-- document runtime completion generation in `README.md`
+- add `gnome-randr apply FILE` using the documented `query --json` schema instead of inventing a second config format
+- match monitors by stable identity rather than connector names, resolve modes by exact id first then resolution/nearest refresh, and restore typed color properties plus managed software color after layout apply
+- allow saved layouts to carry layout-mode changes and leased-monitor state through the same typed schema
+
+### gdctl Alignment
+
+- treat upstream `gdctl` as the semantic/native reference for supported Mutter controls, enums, and capability boundaries
+- land non-breaking `show`, `set`, and `--verify` aliases where semantics truly match
+- extend typed monitor-control parity to include `sdr-native` color mode, `rgb-range`, and for-lease monitors
+- preserve `gnome-randr`'s higher-level workflow layer (`query --json`, `apply FILE`, software color, richer one-shot modify flows) instead of cloning `gdctl` syntax wholesale
+
+### Docs And Maintenance
+
+- replace the sprawling in-progress backlog with addressed notes documenting each completed slice and the remaining backend limits
+- clean up the README into a more compact operational guide while still documenting native controls, software color, saved layouts, JSON output, backend limits, and gdctl alignment
+- add `tutorial.md`, a maintainer-focused walkthrough covering Rust concepts used here, Mutter/Wayland concepts, end-to-end code paths, risk areas, and a maintenance workflow
+- update compatibility/backlog docs so both the xrandr-parity and gdctl-alignment workstreams are archived as complete for the current backend
 
 ## Verification
 
@@ -48,5 +55,6 @@
 - `cargo install --path .`
 - `bash -n <(cargo run --quiet -- completions bash)`
 - `zsh -n <(cargo run --quiet -- completions zsh)`
-- manual completion checks for connectors, modes, scales, brightness values, and `--option=value` forms
-- single-monitor default checks with `modify --dry-run --brightness 1 --filter linear` and `modify --dry-run --scale 1`
+- `cargo run --quiet -- completions fish >/dev/null`
+- representative dry-runs for layout, leasing, native controls, software color, and saved profile apply
+- `query --json` and `apply FILE --dry-run` round-trip checks across schema upgrades
