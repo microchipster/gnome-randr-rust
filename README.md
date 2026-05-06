@@ -224,7 +224,7 @@ If a mode is missing from `query`, Mutter did not expose it.
 
 ## Method
 
-The CLI uses `org.gnome.Mutter.DisplayConfig` over D-Bus.
+`gnome-randr-rust` uses the `dbus` object `org.gnome.Mutter.DisplayConfig`. See https://wiki.gnome.org/Initiatives/Wayland/Gaps/DisplayConfig for the original proposal, although the specification listed there is somewhat out of date (checked via `dbus introspect` on Gnome shell 40.5). Gnome maintain the evolving XML file [here](https://gitlab.gnome.org/GNOME/mutter/-/blob/main/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml).
 
 - `GetCurrentState` for inspection
 - `ApplyMonitorsConfig` for layout changes
