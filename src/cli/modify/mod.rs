@@ -1824,10 +1824,6 @@ pub fn handle(
 
     if opts.dry_run {
         if has_layout_changes {
-            if opts.persistent {
-                println!("attempting to persist config to disk")
-            }
-
             if let Some(layout_mode) = resolved_layout_mode {
                 println!("setting layout mode to {}", layout_mode);
             }
@@ -2192,7 +2188,8 @@ pub fn handle(
                 .clear_primary(connector.as_deref().unwrap())?;
         }
 
-        let layout_properties = configuration_properties(resolved_layout_mode, &for_lease_monitors);
+        let layout_properties =
+            || configuration_properties(resolved_layout_mode, &for_lease_monitors);
 
         if let Err(error) = config.apply_monitors_config_with_properties(
             proxy,

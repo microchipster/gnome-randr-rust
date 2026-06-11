@@ -814,12 +814,9 @@ pub fn handle(
         return Ok(());
     }
 
-    config.apply_monitors_config_with_properties(
-        proxy,
-        configs,
-        opts.persistent,
-        configuration_properties(layout_mode, &monitors_for_lease),
-    )?;
+    config.apply_monitors_config_with_properties(proxy, configs, opts.persistent, || {
+        configuration_properties(layout_mode, &monitors_for_lease)
+    })?;
 
     if software_color.iter().any(|(_, desired)| desired.is_some()) {
         let resources = Resources::get_resources(proxy)?;

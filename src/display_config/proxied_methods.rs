@@ -1,4 +1,4 @@
-use std::convert::TryFrom;
+use std::{convert::TryFrom, thread, time::Duration};
 
 use dbus::{
     arg::{self, PropMap},
@@ -13,6 +13,36 @@ use super::{
 };
 
 type Result<T> = std::prelude::rust_2021::Result<T, dbus::Error>;
+
+const DBUS_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+];
+
+fn is_retryable_dbus_error(error: &dbus::Error) -> bool {
+    let message = error.to_string();
+    message.contains("Did not receive a reply")
+        || message.contains("org.freedesktop.DBus.Error.NoReply")
+        || message.contains("NoReply")
+}
+
+fn retry_dbus_call<T, F>(mut call: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
+    for delay in DBUS_RETRY_DELAYS {
+        match call() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_retryable_dbus_error(&error) => {
+                thread::sleep(delay);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    call()
+}
 
 #[derive(Debug, Clone)]
 pub struct ApplyMonitor<'a> {
@@ -258,21 +288,18 @@ impl DisplayConfig {
         proxy: &Proxy<&Connection>,
         configs: Vec<ApplyConfig>,
         persistent: bool,
-        properties: PropMap,
+        properties: impl Fn() -> PropMap,
     ) -> Result<()> {
         use super::raw::OrgGnomeMutterDisplayConfig;
 
-        let result = proxy.apply_monitors_config(
-            self.serial,
-            if persistent { 2 } else { 1 },
-            configs.iter().map(|config| config.serialize()).collect(),
-            properties,
-        );
-
-        if let Err(err) = &result {
-            println!("{:?}", err);
-        }
-        result
+        retry_dbus_call(|| {
+            proxy.apply_monitors_config(
+                self.serial,
+                if persistent { 2 } else { 1 },
+                configs.iter().map(|config| config.serialize()).collect(),
+                properties(),
+            )
+        })
     }
 
     pub fn apply_monitors_config(
@@ -281,13 +308,13 @@ impl DisplayConfig {
         configs: Vec<ApplyConfig>,
         persistent: bool,
     ) -> Result<()> {
-        self.apply_monitors_config_with_properties(proxy, configs, persistent, PropMap::new())
+        self.apply_monitors_config_with_properties(proxy, configs, persistent, PropMap::new)
     }
 
     pub fn get_current_state(proxy: &Proxy<&Connection>) -> Result<DisplayConfig> {
         use super::raw::OrgGnomeMutterDisplayConfig;
 
-        let raw_output = proxy.get_current_state()?;
+        let raw_output = retry_dbus_call(|| proxy.get_current_state())?;
         Ok(DisplayConfig::from(raw_output))
     }
 
@@ -295,21 +322,22 @@ impl DisplayConfig {
         use super::raw::OrgFreedesktopDBusProperties;
         use super::raw::OrgGnomeMutterDisplayConfig;
 
-        let power_save_mode = proxy
-            .power_save_mode()
+        let power_save_mode = retry_dbus_call(|| proxy.power_save_mode())
             .ok()
             .and_then(PowerSaveMode::from_raw)
             .unwrap_or(PowerSaveMode::Unknown);
-        let properties = proxy.get_all("org.gnome.Mutter.DisplayConfig")?;
-        let backlight = proxy
-            .get::<(u32, Vec<PropMap>)>("org.gnome.Mutter.DisplayConfig", "Backlight")
-            .ok()
-            .map(parse_backlight_state);
-        let luminance = proxy
-            .get::<Vec<PropMap>>("org.gnome.Mutter.DisplayConfig", "Luminance")
-            .ok()
-            .map(parse_luminance_state)
-            .unwrap_or_default();
+        let properties = retry_dbus_call(|| proxy.get_all("org.gnome.Mutter.DisplayConfig"))?;
+        let backlight = retry_dbus_call(|| {
+            proxy.get::<(u32, Vec<PropMap>)>("org.gnome.Mutter.DisplayConfig", "Backlight")
+        })
+        .ok()
+        .map(parse_backlight_state);
+        let luminance = retry_dbus_call(|| {
+            proxy.get::<Vec<PropMap>>("org.gnome.Mutter.DisplayConfig", "Luminance")
+        })
+        .ok()
+        .map(parse_luminance_state)
+        .unwrap_or_default();
 
         Ok(NativeDisplayState {
             power_save_mode,
@@ -336,11 +364,13 @@ impl DisplayConfig {
         connector: &str,
         value: i32,
     ) -> Result<()> {
-        proxy.method_call(
-            "org.gnome.Mutter.DisplayConfig",
-            "SetBacklight",
-            (serial, connector, value),
-        )
+        retry_dbus_call(|| {
+            proxy.method_call(
+                "org.gnome.Mutter.DisplayConfig",
+                "SetBacklight",
+                (serial, connector, value),
+            )
+        })
     }
 
     pub fn set_luminance(
@@ -349,11 +379,13 @@ impl DisplayConfig {
         color_mode: ColorMode,
         luminance: f64,
     ) -> Result<()> {
-        proxy.method_call(
-            "org.gnome.Mutter.DisplayConfig",
-            "SetLuminance",
-            (connector, color_mode.raw_value(), luminance),
-        )
+        retry_dbus_call(|| {
+            proxy.method_call(
+                "org.gnome.Mutter.DisplayConfig",
+                "SetLuminance",
+                (connector, color_mode.raw_value(), luminance),
+            )
+        })
     }
 
     pub fn reset_luminance(
@@ -361,11 +393,13 @@ impl DisplayConfig {
         connector: &str,
         color_mode: ColorMode,
     ) -> Result<()> {
-        proxy.method_call(
-            "org.gnome.Mutter.DisplayConfig",
-            "ResetLuminance",
-            (connector, color_mode.raw_value()),
-        )
+        retry_dbus_call(|| {
+            proxy.method_call(
+                "org.gnome.Mutter.DisplayConfig",
+                "ResetLuminance",
+                (connector, color_mode.raw_value()),
+            )
+        })
     }
 }
 
