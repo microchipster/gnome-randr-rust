@@ -21,7 +21,7 @@ use gnome_randr::{
 use serde::Deserialize;
 use structopt::StructOpt;
 
-use super::brightness;
+use super::{brightness, monitors_xml};
 
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 4;
 const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 8;
@@ -810,13 +810,25 @@ pub fn handle(
 
     if opts.dry_run {
         print_preview(layout_mode, &configs, &software_color, &monitors_for_lease);
+        if opts.persistent {
+            println!("attempting to persist config to disk");
+        }
         println!("dry run: no changes made.");
         return Ok(());
     }
 
-    config.apply_monitors_config_with_properties(proxy, configs, opts.persistent, || {
-        configuration_properties(layout_mode, &monitors_for_lease)
-    })?;
+    let configs_for_apply = configs.clone();
+    config.apply_monitors_config_with_properties(
+        proxy,
+        configs_for_apply,
+        opts.persistent,
+        || configuration_properties(layout_mode, &monitors_for_lease),
+    )?;
+
+    if opts.persistent {
+        let path = monitors_xml::write_monitors_xml(config, layout_mode, &configs)?;
+        println!("wrote monitors.xml to {}", path.display());
+    }
 
     if software_color.iter().any(|(_, desired)| desired.is_some()) {
         let resources = Resources::get_resources(proxy)?;

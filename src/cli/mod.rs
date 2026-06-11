@@ -3,6 +3,7 @@ mod brightness;
 mod common;
 pub mod complete;
 pub mod completions;
+mod monitors_xml;
 use std::{env, ffi::OsString, time::Duration};
 
 use dbus::blocking::Connection;

@@ -25,6 +25,7 @@ use super::{
     common::{
         format_scale, match_supported_scale, parse_position, parse_resolution, resolve_connector,
     },
+    monitors_xml,
 };
 use gnome_randr::display_config::logical_monitor::Transform;
 
@@ -2191,9 +2192,11 @@ pub fn handle(
         let layout_properties =
             || configuration_properties(resolved_layout_mode, &for_lease_monitors);
 
+        let configs = planner.unwrap().into_configs();
+
         if let Err(error) = config.apply_monitors_config_with_properties(
             proxy,
-            planner.unwrap().into_configs(),
+            configs.clone(),
             opts.persistent,
             layout_properties,
         ) {
@@ -2207,6 +2210,11 @@ pub fn handle(
             }
 
             return Err(error.into());
+        }
+
+        if opts.persistent {
+            let path = monitors_xml::write_monitors_xml(config, resolved_layout_mode, &configs)?;
+            println!("wrote monitors.xml to {}", path.display());
         }
     }
 

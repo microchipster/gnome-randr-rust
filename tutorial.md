@@ -63,6 +63,8 @@ The native-control surface that should now stay aligned with `gdctl` includes:
 - color mode, rgb range, and monitor leasing
 - power-save, backlight, and luminance
 
+When you pass `--persistent`, the CLI applies the change live and also writes GNOME's `monitors.xml` so the layout survives reboot.
+
 Those aliases are intentionally narrow. They make the native correspondence easier to see, but they do not turn this repo into a `gdctl` syntax clone.
 
 Maintenance rule:

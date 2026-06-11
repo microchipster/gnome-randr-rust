@@ -84,6 +84,10 @@ Preview without applying:
 gnome-randr modify eDP-1 --scale 2 --dry-run
 ```
 
+## Persistent Layouts
+
+Use `--persistent` when you want a layout change to survive reboot. The CLI still applies the change live through Mutter, and it also writes GNOME's `monitors.xml` in the user config directory so the layout can be restored on the next login.
+
 ## Software Color
 
 Software color uses the current compositor-installed LUT as baseline.
